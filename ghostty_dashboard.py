@@ -1,0 +1,966 @@
+#!/usr/bin/env python3
+"""
+Ghostty Terminal Launcher Dashboard - Web UI
+A browser-based launcher with configuration and color picker.
+"""
+
+import json
+import os
+import subprocess
+import sys
+import webbrowser
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import parse_qs, urlparse
+
+CONFIG_PATH = os.path.expanduser("~/.claude/ghostty_dashboard_config.json")
+PORT = 8457
+
+STATUS_REPO = os.path.expanduser("~/project-status")
+STATUS_JSON = os.path.join(STATUS_REPO, "status.json")
+
+
+def load_status():
+    """Pull the project-status repo (best effort) and return the card array."""
+    try:
+        subprocess.run(["git", "-C", STATUS_REPO, "pull", "--quiet", "--ff-only"],
+                       capture_output=True, timeout=10)
+    except Exception:
+        pass  # offline / no repo — fall back to whatever is on disk
+    try:
+        with open(STATUS_JSON) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, IOError, FileNotFoundError):
+        return []
+
+
+def load_history(project, limit=30):
+    """Return past versions of a project's card from git history (newest first)."""
+    safe = os.path.basename(project)  # guard against path traversal
+    if not safe:
+        return []
+    rel = f"status/{safe}.json"
+    log = subprocess.run(
+        ["git", "-C", STATUS_REPO, "log", "--format=%H", "--", rel],
+        capture_output=True, text=True).stdout.strip()
+    versions = []
+    for sha in log.splitlines()[:limit]:
+        show = subprocess.run(["git", "-C", STATUS_REPO, "show", f"{sha}:{rel}"],
+                              capture_output=True, text=True)
+        if show.returncode != 0:
+            continue
+        try:
+            versions.append(json.loads(show.stdout))
+        except json.JSONDecodeError:
+            continue
+    return versions
+
+DEFAULT_PROJECTS = [
+    {
+        "name": "CXRO Website",
+        "directory": "/Users/rhmiyakawa/Documents/Sites/cxro.lbl.gov/cxro-www-2026",
+        "background": "#0d4d4d",
+        "foreground": "#ffffff",
+        "icon": "🌐"
+    }
+]
+
+
+def load_config():
+    if os.path.exists(CONFIG_PATH):
+        try:
+            with open(CONFIG_PATH, "r") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            pass
+    return DEFAULT_PROJECTS.copy()
+
+
+def save_config(projects):
+    os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+    with open(CONFIG_PATH, "w") as f:
+        json.dump(projects, f, indent=2)
+
+
+def launch_ghostty(directory, background, foreground="#ffffff", ssh=None):
+    directory = os.path.expanduser(directory)
+    ghostty_bin = "/Applications/Ghostty.app/Contents/MacOS/ghostty"
+    cmd = [
+        ghostty_bin,
+        f"--background={background}",
+        f"--foreground={foreground}",
+    ]
+    if ssh:
+        # SSH into remote server
+        cmd.extend(["-e", f"ssh {ssh}"])
+    else:
+        # Local directory
+        cmd.append(f"--working-directory={directory}")
+    try:
+        subprocess.Popen(cmd, start_new_session=True)
+        return True
+    except Exception as e:
+        print(f"Error launching ghostty: {e}")
+        return False
+
+
+HTML_TEMPLATE = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ghostty Launcher</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            color: #e2e8f0;
+            padding: 2rem;
+        }
+
+        .container { max-width: 1200px; margin: 0 auto; }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 2rem;
+        }
+
+        h1 { font-size: 1.75rem; font-weight: 600; }
+
+        .btn {
+            padding: 0.6rem 1.2rem;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            font-weight: 500;
+            transition: all 0.2s;
+        }
+
+        .btn-primary {
+            background: #8b5cf6;
+            color: white;
+        }
+        .btn-primary:hover { background: #7c3aed; }
+
+        .btn-secondary {
+            background: rgba(255,255,255,0.1);
+            color: #e2e8f0;
+        }
+        .btn-secondary:hover { background: rgba(255,255,255,0.2); }
+
+        .cards {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 1.25rem;
+        }
+
+        .card {
+            border-radius: 16px;
+            padding: 1.5rem;
+            cursor: pointer;
+            transition: all 0.2s;
+            border: 2px solid transparent;
+            min-height: 160px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            position: relative;
+        }
+
+        .card:hover {
+            transform: translateY(-4px);
+            border-color: rgba(255,255,255,0.3);
+            box-shadow: 0 12px 40px rgba(0,0,0,0.4);
+        }
+
+        .card-icon { font-size: 3rem; margin-bottom: 0.75rem; }
+        .card-name { font-size: 1.1rem; font-weight: 600; margin-bottom: 0.25rem; }
+        .card-path {
+            font-size: 0.75rem;
+            opacity: 0.7;
+            word-break: break-all;
+            max-width: 100%;
+        }
+
+        .card-edit {
+            position: absolute;
+            top: 8px;
+            right: 8px;
+            background: rgba(0,0,0,0.3);
+            border: none;
+            border-radius: 6px;
+            padding: 4px 8px;
+            cursor: pointer;
+            opacity: 0;
+            transition: opacity 0.2s;
+            color: white;
+            font-size: 0.8rem;
+        }
+        .card:hover .card-edit { opacity: 1; }
+        .card-edit:hover { background: rgba(0,0,0,0.5); }
+
+        .add-card {
+            background: rgba(255,255,255,0.05);
+            border: 2px dashed rgba(255,255,255,0.2);
+            color: rgba(255,255,255,0.5);
+        }
+        .add-card:hover {
+            background: rgba(255,255,255,0.1);
+            border-color: rgba(255,255,255,0.4);
+            color: rgba(255,255,255,0.8);
+        }
+        .add-card .card-icon { font-size: 2.5rem; }
+
+        /* Modal */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,0.7);
+            backdrop-filter: blur(4px);
+            z-index: 100;
+            align-items: center;
+            justify-content: center;
+        }
+        .modal-overlay.active { display: flex; }
+
+        .modal {
+            background: #1e293b;
+            border-radius: 16px;
+            padding: 2rem;
+            width: 90%;
+            max-width: 450px;
+            box-shadow: 0 25px 50px rgba(0,0,0,0.5);
+        }
+
+        .modal h2 { margin-bottom: 1.5rem; font-size: 1.25rem; }
+
+        .form-group { margin-bottom: 1.25rem; }
+        .form-group label {
+            display: block;
+            margin-bottom: 0.5rem;
+            font-size: 0.875rem;
+            font-weight: 500;
+            color: #94a3b8;
+        }
+
+        .form-group input[type="text"] {
+            width: 100%;
+            padding: 0.75rem 1rem;
+            border: 1px solid #334155;
+            border-radius: 8px;
+            background: #0f172a;
+            color: #e2e8f0;
+            font-size: 1rem;
+        }
+        .form-group input:focus {
+            outline: none;
+            border-color: #8b5cf6;
+        }
+
+        .color-input-wrapper {
+            display: flex;
+            gap: 0.75rem;
+            align-items: center;
+        }
+
+        .color-input-wrapper input[type="color"] {
+            width: 50px;
+            height: 42px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            background: none;
+        }
+
+        .color-input-wrapper input[type="text"] {
+            flex: 1;
+        }
+
+        .modal-actions {
+            display: flex;
+            gap: 0.75rem;
+            justify-content: flex-end;
+            margin-top: 1.5rem;
+        }
+
+        .btn-danger {
+            background: #dc2626;
+            color: white;
+            margin-right: auto;
+        }
+        .btn-danger:hover { background: #b91c1c; }
+
+        .empty-state {
+            text-align: center;
+            padding: 4rem 2rem;
+            color: #64748b;
+        }
+        .empty-state p { margin-bottom: 1rem; }
+
+        /* Tabs */
+        .tabs { display: flex; gap: 0.5rem; }
+        .tab {
+            padding: 0.5rem 1.1rem;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            font-weight: 500;
+            background: rgba(255,255,255,0.08);
+            color: #94a3b8;
+            transition: all 0.2s;
+        }
+        .tab:hover { background: rgba(255,255,255,0.15); color: #e2e8f0; }
+        .tab.active { background: #8b5cf6; color: white; }
+
+        /* Status view */
+        .status-bar {
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            gap: 0.75rem;
+            margin-bottom: 1rem;
+        }
+        .status-updated { font-size: 0.75rem; color: #64748b; }
+        .status-refresh { font-size: 0.8rem; padding: 0.45rem 0.9rem; }
+        .status-refresh.spinning { opacity: 0.6; pointer-events: none; }
+        .status-layout {
+            display: flex;
+            flex-direction: column;
+            gap: 1.25rem;
+        }
+        .status-list {
+            display: flex;
+            flex-direction: row;
+            flex-wrap: wrap;
+            gap: 0.6rem;
+            padding-bottom: 1.25rem;
+            border-bottom: 1px solid rgba(255,255,255,0.08);
+        }
+        .status-item {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.55rem 0.95rem;
+            border-radius: 999px;
+            cursor: pointer;
+            background: rgba(255,255,255,0.05);
+            border: 1px solid transparent;
+            transition: all 0.15s;
+            white-space: nowrap;
+        }
+        .status-item:hover { background: rgba(255,255,255,0.1); }
+        .status-item.active { background: rgba(139,92,246,0.18); border-color: #8b5cf6; }
+        .status-item .glyph { font-size: 0.85rem; }
+        .status-item .si-name { font-weight: 600; font-size: 0.9rem; }
+        .status-item .si-age { font-size: 0.68rem; opacity: 0.55; }
+
+        .status-detail {
+            background: rgba(255,255,255,0.04);
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 14px;
+            padding: 1.75rem;
+            min-height: 300px;
+        }
+        .status-empty { color: #64748b; text-align: center; padding: 3rem 1rem; }
+        .sd-head { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 0.5rem; }
+        .sd-head h2 { font-size: 1.4rem; }
+        .sd-badge {
+            font-size: 0.7rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            padding: 0.2rem 0.6rem;
+            border-radius: 999px;
+        }
+        .sd-meta {
+            font-size: 0.78rem;
+            color: #94a3b8;
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            margin-bottom: 1.25rem;
+            word-break: break-all;
+        }
+        .sd-fields { display: flex; flex-direction: column; gap: 0.75rem; margin-bottom: 1.5rem; }
+        .sd-field { display: grid; grid-template-columns: 70px 1fr; gap: 0.75rem; }
+        .sd-field .k { font-size: 0.75rem; color: #64748b; text-transform: uppercase; padding-top: 2px; }
+        .sd-field .v { font-size: 0.95rem; }
+        .sd-details {
+            border-top: 1px solid rgba(255,255,255,0.08);
+            padding-top: 1.25rem;
+            font-size: 0.9rem;
+            line-height: 1.6;
+            color: #cbd5e1;
+        }
+        .sd-details code {
+            background: rgba(0,0,0,0.35);
+            padding: 0.1rem 0.35rem;
+            border-radius: 5px;
+            font-size: 0.85em;
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        }
+        .sd-details strong { color: #e2e8f0; }
+        .sd-launch { margin-top: 1.5rem; }
+
+        /* Status history */
+        .sd-hist-head {
+            margin-top: 1.5rem;
+            padding-top: 1rem;
+            border-top: 1px solid rgba(255,255,255,0.08);
+            font-size: 0.72rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: #64748b;
+            margin-bottom: 0.6rem;
+        }
+        .sd-hist-item {
+            background: rgba(255,255,255,0.03);
+            border: 1px solid rgba(255,255,255,0.06);
+            border-radius: 8px;
+            margin-bottom: 0.4rem;
+            padding: 0.5rem 0.75rem;
+        }
+        .sd-hist-item summary {
+            cursor: pointer;
+            display: flex;
+            gap: 0.6rem;
+            align-items: center;
+            font-size: 0.85rem;
+            list-style: none;
+        }
+        .sd-hist-item summary::-webkit-details-marker { display: none; }
+        .sd-hist-item summary:hover { color: #fff; }
+        .sd-hist-when { color: #94a3b8; font-size: 0.72rem; white-space: nowrap; }
+        .sd-hist-focus { color: #cbd5e1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .sd-hist-body {
+            margin-top: 0.6rem;
+            padding-top: 0.6rem;
+            border-top: 1px solid rgba(255,255,255,0.06);
+            font-size: 0.85rem;
+            color: #cbd5e1;
+        }
+        .sd-hist-line { margin-bottom: 0.3rem; }
+        .sd-hist-line .k {
+            color: #64748b;
+            text-transform: uppercase;
+            font-size: 0.7rem;
+            margin-right: 0.4rem;
+        }
+        .sd-hist-details { margin-top: 0.5rem; line-height: 1.55; }
+        .sd-hist-details code {
+            background: rgba(0,0,0,0.35);
+            padding: 0.1rem 0.35rem;
+            border-radius: 5px;
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 0.85em;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🖥️ Ghostty Launcher</h1>
+            <nav class="tabs">
+                <button class="tab active" id="tab-launcher" onclick="switchView('launcher')">Launcher</button>
+                <button class="tab" id="tab-status" onclick="switchView('status')">Status</button>
+            </nav>
+        </header>
+
+        <div id="view-launcher">
+            <div class="cards" id="cards"></div>
+        </div>
+
+        <div id="view-status" style="display:none">
+            <div class="status-bar">
+                <span class="status-updated" id="status-updated"></span>
+                <button class="btn btn-secondary status-refresh" id="status-refresh" onclick="loadStatus(true)">↻ Refresh</button>
+            </div>
+            <div class="status-layout">
+                <div class="status-list" id="status-list"></div>
+                <div class="status-detail" id="status-detail">
+                    <div class="status-empty">Select a project to view its status.</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal-overlay" id="modal">
+        <div class="modal">
+            <h2 id="modal-title">Add Project</h2>
+            <form id="project-form">
+                <input type="hidden" id="edit-index" value="-1">
+
+                <div class="form-group">
+                    <label>Name</label>
+                    <input type="text" id="project-name" placeholder="My Project" required>
+                </div>
+
+                <div class="form-group">
+                    <label>Icon (emoji)</label>
+                    <input type="text" id="project-icon" placeholder="📁" maxlength="4">
+                </div>
+
+                <div class="form-group">
+                    <label>Directory Path (local)</label>
+                    <input type="text" id="project-directory" placeholder="/path/to/project">
+                </div>
+
+                <div class="form-group">
+                    <label>SSH Command (optional, overrides directory)</label>
+                    <input type="text" id="project-ssh" placeholder="user@hostname">
+                </div>
+
+                <div class="form-group">
+                    <label>Background Color</label>
+                    <div class="color-input-wrapper">
+                        <input type="color" id="project-bg-picker" value="#1a1a2e">
+                        <input type="text" id="project-bg" placeholder="#1a1a2e" required>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label>Foreground Color</label>
+                    <div class="color-input-wrapper">
+                        <input type="color" id="project-fg-picker" value="#ffffff">
+                        <input type="text" id="project-fg" placeholder="#ffffff" required>
+                    </div>
+                </div>
+
+                <div class="modal-actions">
+                    <button type="button" class="btn btn-danger" id="delete-btn" style="display:none">Delete</button>
+                    <button type="button" class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+                    <button type="submit" class="btn btn-primary">Save</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <script>
+        let projects = [];
+
+        async function loadProjects() {
+            try {
+                const res = await fetch('/api/projects');
+                projects = await res.json();
+                console.log('Loaded projects:', projects);
+            } catch (err) {
+                console.error('Failed to load projects:', err);
+                projects = [];
+            }
+            renderCards();
+        }
+
+        function renderCards() {
+            const container = document.getElementById('cards');
+            console.log('renderCards called, projects:', projects, 'container:', container);
+
+            if (!container) {
+                console.error('Cards container not found!');
+                return;
+            }
+
+            if (!projects || projects.length === 0) {
+                container.innerHTML = `
+                    <div class="card add-card" onclick="openAddModal()">
+                        <div class="card-icon">+</div>
+                        <div class="card-name">Add Project</div>
+                    </div>
+                `;
+                return;
+            }
+
+            container.innerHTML = projects.map((p, i) => `
+                <div class="card" style="background: ${p.background}; color: ${p.foreground || '#ffffff'}" onclick="launch(${i})">
+                    <button class="card-edit" onclick="event.stopPropagation(); openEditModal(${i})">Edit</button>
+                    <div class="card-icon">${p.icon || '📁'}</div>
+                    <div class="card-name">${escapeHtml(p.name)}</div>
+                    <div class="card-path">${p.ssh ? 'SSH: ' + escapeHtml(p.ssh) : escapeHtml(truncatePath(p.directory || ''))}</div>
+                </div>
+            `).join('') + `
+                <div class="card add-card" onclick="openAddModal()">
+                    <div class="card-icon">+</div>
+                    <div class="card-name">Add Project</div>
+                </div>
+            `;
+        }
+
+        function truncatePath(path) {
+            if (path.length > 35) return '...' + path.slice(-32);
+            return path;
+        }
+
+        function escapeHtml(str) {
+            const div = document.createElement('div');
+            div.textContent = str;
+            return div.innerHTML;
+        }
+
+        async function launch(index) {
+            const p = projects[index];
+            await fetch('/api/launch', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    directory: p.directory,
+                    background: p.background,
+                    foreground: p.foreground || '#ffffff',
+                    ssh: p.ssh || null
+                })
+            });
+        }
+
+        function openAddModal() {
+            document.getElementById('modal-title').textContent = 'Add Project';
+            document.getElementById('edit-index').value = -1;
+            document.getElementById('project-name').value = '';
+            document.getElementById('project-icon').value = '📁';
+            document.getElementById('project-directory').value = '';
+            document.getElementById('project-ssh').value = '';
+            document.getElementById('project-bg').value = '#1a1a2e';
+            document.getElementById('project-bg-picker').value = '#1a1a2e';
+            document.getElementById('project-fg').value = '#ffffff';
+            document.getElementById('project-fg-picker').value = '#ffffff';
+            document.getElementById('delete-btn').style.display = 'none';
+            document.getElementById('modal').classList.add('active');
+        }
+
+        function openEditModal(index) {
+            const p = projects[index];
+            document.getElementById('modal-title').textContent = 'Edit Project';
+            document.getElementById('edit-index').value = index;
+            document.getElementById('project-name').value = p.name;
+            document.getElementById('project-icon').value = p.icon || '📁';
+            document.getElementById('project-directory').value = p.directory || '';
+            document.getElementById('project-ssh').value = p.ssh || '';
+            document.getElementById('project-bg').value = p.background;
+            document.getElementById('project-bg-picker').value = p.background;
+            document.getElementById('project-fg').value = p.foreground || '#ffffff';
+            document.getElementById('project-fg-picker').value = p.foreground || '#ffffff';
+            document.getElementById('delete-btn').style.display = 'block';
+            document.getElementById('modal').classList.add('active');
+        }
+
+        function closeModal() {
+            document.getElementById('modal').classList.remove('active');
+        }
+
+        document.getElementById('project-bg-picker').addEventListener('input', (e) => {
+            document.getElementById('project-bg').value = e.target.value;
+        });
+
+        document.getElementById('project-bg').addEventListener('input', (e) => {
+            if (/^#[0-9a-fA-F]{6}$/.test(e.target.value)) {
+                document.getElementById('project-bg-picker').value = e.target.value;
+            }
+        });
+
+        document.getElementById('project-fg-picker').addEventListener('input', (e) => {
+            document.getElementById('project-fg').value = e.target.value;
+        });
+
+        document.getElementById('project-fg').addEventListener('input', (e) => {
+            if (/^#[0-9a-fA-F]{6}$/.test(e.target.value)) {
+                document.getElementById('project-fg-picker').value = e.target.value;
+            }
+        });
+
+        document.getElementById('project-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            const ssh = document.getElementById('project-ssh').value.trim();
+            const directory = document.getElementById('project-directory').value.trim();
+
+            if (!ssh && !directory) {
+                alert('Please specify either a directory or SSH command');
+                return;
+            }
+
+            const index = parseInt(document.getElementById('edit-index').value);
+            const project = {
+                name: document.getElementById('project-name').value,
+                icon: document.getElementById('project-icon').value || '📁',
+                directory: directory,
+                ssh: ssh || null,
+                background: document.getElementById('project-bg').value,
+                foreground: document.getElementById('project-fg').value || '#ffffff'
+            };
+
+            if (index >= 0) {
+                projects[index] = project;
+            } else {
+                projects.push(project);
+            }
+
+            await saveProjects();
+            closeModal();
+            renderCards();
+        });
+
+        document.getElementById('delete-btn').addEventListener('click', async () => {
+            const index = parseInt(document.getElementById('edit-index').value);
+            if (index >= 0 && confirm('Delete this project?')) {
+                projects.splice(index, 1);
+                await saveProjects();
+                closeModal();
+                renderCards();
+            }
+        });
+
+        async function saveProjects() {
+            await fetch('/api/projects', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(projects)
+            });
+        }
+
+        document.getElementById('modal').addEventListener('click', (e) => {
+            if (e.target.id === 'modal') closeModal();
+        });
+
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') closeModal();
+        });
+
+        // ---- Status view ----
+        const STATUS_UI = {
+            blocked: { glyph: '🔴', label: 'blocked', color: '#dc2626' },
+            active:  { glyph: '🟢', label: 'active',  color: '#16a34a' },
+            paused:  { glyph: '🟡', label: 'paused',  color: '#ca8a04' },
+            done:    { glyph: '✅', label: 'done',    color: '#3b82f6' },
+        };
+        let statusCards = [];
+        let statusSelected = -1;
+        let statusLoaded = false;
+
+        function switchView(name) {
+            const isStatus = name === 'status';
+            document.getElementById('view-launcher').style.display = isStatus ? 'none' : '';
+            document.getElementById('view-status').style.display = isStatus ? '' : 'none';
+            document.getElementById('tab-launcher').classList.toggle('active', !isStatus);
+            document.getElementById('tab-status').classList.toggle('active', isStatus);
+            if (isStatus && !statusLoaded) loadStatus();
+        }
+
+        async function loadStatus(manual) {
+            statusLoaded = true;
+            const btn = document.getElementById('status-refresh');
+            // Remember which project is selected so a refresh doesn't lose it.
+            const prevName = statusSelected >= 0 && statusCards[statusSelected]
+                ? statusCards[statusSelected].project : null;
+            if (manual && btn) btn.classList.add('spinning');
+            if (!statusCards.length) {
+                document.getElementById('status-list').innerHTML =
+                    '<div class="status-empty">Loading…</div>';
+            }
+            try {
+                const res = await fetch('/api/status');
+                statusCards = await res.json();
+            } catch (err) {
+                statusCards = [];
+            } finally {
+                if (btn) btn.classList.remove('spinning');
+            }
+            // Most recently updated first.
+            statusCards.sort((a, b) => (Date.parse(b.updated) || 0) - (Date.parse(a.updated) || 0));
+            // Restore the previous selection by project name (index may have shifted).
+            statusSelected = prevName
+                ? statusCards.findIndex(c => c.project === prevName) : -1;
+            renderStatusList();
+            if (statusSelected >= 0) selectStatus(statusSelected);
+            const upd = document.getElementById('status-updated');
+            if (upd) upd.textContent = 'Updated ' + new Date().toLocaleTimeString();
+        }
+
+        function ago(iso) {
+            const t = Date.parse(iso);
+            if (isNaN(t)) return iso || '';
+            const s = (Date.now() - t) / 1000;
+            if (s < 3600) return Math.floor(s / 60) + 'm ago';
+            if (s < 86400) return Math.floor(s / 3600) + 'h ago';
+            return Math.floor(s / 86400) + 'd ago';
+        }
+
+        function renderStatusList() {
+            const list = document.getElementById('status-list');
+            if (!statusCards.length) {
+                list.innerHTML = '<div class="status-empty">No status cards found.<br>' +
+                    'Run "save state" in a project.</div>';
+                return;
+            }
+            list.innerHTML = statusCards.map((c, i) => {
+                const ui = STATUS_UI[c.status] || { glyph: '⚪' };
+                return `<div class="status-item ${i === statusSelected ? 'active' : ''}" onclick="selectStatus(${i})">
+                    <span class="glyph">${ui.glyph}</span>
+                    <span class="si-name">${escapeHtml(c.project || '?')}</span>
+                    <span class="si-age">${ago(c.updated)}</span>
+                </div>`;
+            }).join('');
+        }
+
+        function renderDetails(md) {
+            let h = escapeHtml(md || '');
+            h = h.replace(/`([^`]+)`/g, '<code>$1</code>');
+            h = h.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+            h = h.replace(/\n/g, '<br>');
+            return h;
+        }
+
+        function field(k, v) {
+            if (!v) return '';
+            return `<div class="sd-field"><div class="k">${k}</div><div class="v">${escapeHtml(v)}</div></div>`;
+        }
+
+        function selectStatus(i) {
+            statusSelected = i;
+            renderStatusList();
+            const c = statusCards[i];
+            const ui = STATUS_UI[c.status] || { glyph: '⚪', label: c.status, color: '#64748b' };
+            const detail = document.getElementById('status-detail');
+            detail.innerHTML = `
+                <div class="sd-head">
+                    <span>${ui.glyph}</span>
+                    <h2>${escapeHtml(c.project || '?')}</h2>
+                    <span class="sd-badge" style="background:${ui.color};color:#fff">${ui.label}</span>
+                </div>
+                <div class="sd-meta">${escapeHtml(c.machine || '')} · ${escapeHtml(c.pwd || '')} · ${escapeHtml(c.repo || '')} @ ${escapeHtml(c.branch || '')} · updated ${ago(c.updated)}</div>
+                <div class="sd-fields">
+                    ${field('Focus', c.focus)}
+                    ${field('Blocker', c.blocker)}
+                    ${field('Next', c.next)}
+                </div>
+                ${c.details ? `<div class="sd-details">${renderDetails(c.details)}</div>` : ''}
+                <div class="sd-launch">
+                    <button class="btn btn-secondary" onclick="launchStatus(${i})">🖥️ Open in Ghostty</button>
+                </div>
+                <div id="sd-history"></div>
+            `;
+            loadHistory(c.project);
+        }
+
+        async function loadHistory(project) {
+            const el = document.getElementById('sd-history');
+            if (!el) return;
+            el.innerHTML = '<div class="sd-hist-head">Loading history…</div>';
+            let hist = [];
+            try {
+                const r = await fetch('/api/history?project=' + encodeURIComponent(project));
+                hist = await r.json();
+            } catch (e) { el.innerHTML = ''; return; }
+            const past = hist.slice(1);  // [0] is the current card, already shown above
+            if (!past.length) { el.innerHTML = '<div class="sd-hist-head">No earlier saves</div>'; return; }
+            el.innerHTML = '<div class="sd-hist-head">History · ' + past.length +
+                ' earlier save' + (past.length > 1 ? 's' : '') + '</div>' +
+                past.map(c => {
+                    const ui = STATUS_UI[c.status] || { glyph: '⚪' };
+                    return `<details class="sd-hist-item">
+                        <summary><span>${ui.glyph}</span><span class="sd-hist-when">${ago(c.updated)}</span><span class="sd-hist-focus">${escapeHtml(c.focus || '')}</span></summary>
+                        <div class="sd-hist-body">
+                            ${c.blocker ? '<div class="sd-hist-line"><span class="k">Blocker</span> ' + escapeHtml(c.blocker) + '</div>' : ''}
+                            ${c.next ? '<div class="sd-hist-line"><span class="k">Next</span> ' + escapeHtml(c.next) + '</div>' : ''}
+                            ${c.details ? '<div class="sd-hist-details">' + renderDetails(c.details) + '</div>' : ''}
+                            <div class="sd-hist-line"><span class="k">Branch</span> ${escapeHtml(c.branch || '')}</div>
+                        </div>
+                    </details>`;
+                }).join('');
+        }
+
+        async function launchStatus(i) {
+            const c = statusCards[i];
+            await fetch('/api/launch', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ directory: c.pwd || '~', background: '#16213e', foreground: '#ffffff' })
+            });
+        }
+
+        // Silently refresh the status view every 2 minutes (only when it's visible
+        // and the tab is focused, to avoid needless git pulls in the background).
+        setInterval(() => {
+            const visible = document.getElementById('view-status').style.display !== 'none';
+            if (visible && !document.hidden) loadStatus(false);
+        }, 120000);
+
+        // Show add card immediately, then load data
+        renderCards();
+        loadProjects();
+    </script>
+</body>
+</html>
+"""
+
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        pass  # Suppress request logging
+
+    def _send_response(self, content, content_type="text/html", status=200):
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        if isinstance(content, bytes):
+            data = content
+        else:
+            data = content.encode('utf-8')
+        self.send_header("Content-Length", len(data))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self):
+        if self.path == "/" or self.path == "/index.html":
+            self._send_response(HTML_TEMPLATE)
+        elif self.path == "/api/projects":
+            self._send_response(json.dumps(load_config()), "application/json")
+        elif self.path == "/api/status":
+            self._send_response(json.dumps(load_status()), "application/json")
+        elif self.path.startswith("/api/history"):
+            q = parse_qs(urlparse(self.path).query)
+            self._send_response(json.dumps(load_history(q.get("project", [""])[0])),
+                                "application/json")
+        else:
+            self._send_response("Not Found", status=404)
+
+    def do_POST(self):
+        content_length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(content_length).decode()
+
+        if self.path == "/api/projects":
+            projects = json.loads(body)
+            save_config(projects)
+            self._send_response('{"ok":true}', "application/json")
+
+        elif self.path == "/api/launch":
+            data = json.loads(body)
+            success = launch_ghostty(
+                data.get("directory", "~"),
+                data["background"],
+                data.get("foreground", "#ffffff"),
+                data.get("ssh")
+            )
+            self._send_response(json.dumps({"ok": success}), "application/json")
+
+        else:
+            self._send_response("Not Found", status=404)
+
+
+def main():
+    server = HTTPServer(("127.0.0.1", PORT), Handler)
+    url = f"http://127.0.0.1:{PORT}"
+    print(f"Ghostty Launcher running at {url}")
+    if "--no-browser" not in sys.argv:
+        webbrowser.open(url)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nShutting down...")
+        server.shutdown()
+
+
+if __name__ == "__main__":
+    main()

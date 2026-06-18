@@ -1,0 +1,2 @@
+#!/bin/bash
+exec /usr/bin/python3 ~/.claude/ghostty_dashboard.py "$@"
