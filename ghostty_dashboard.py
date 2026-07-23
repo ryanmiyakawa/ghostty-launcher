@@ -42,13 +42,19 @@ def load_cockpit_ui():
             ui = json.load(f)
     except (IOError, json.JSONDecodeError):
         ui = {}
-    ui.setdefault("labels", {})   # session_id -> custom name
-    ui.setdefault("order", [])    # session_id[] manual ordering
+    ui.setdefault("labels", {})     # session_id -> custom note label
+    ui.setdefault("order", [])      # session_id[] manual ordering
+    ui.setdefault("identity", {})   # directory -> {name, color} window identity override
     return ui
 
 
+def _is_hex_color(s):
+    return isinstance(s, str) and len(s) == 7 and s[0] == "#" and \
+        all(c in "0123456789abcdefABCDEF" for c in s[1:])
+
+
 def update_cockpit_ui(patch):
-    """Merge a partial UI update (labels / order) and persist it."""
+    """Merge a partial UI update (labels / order / identity) and persist it."""
     with _ui_lock:
         ui = load_cockpit_ui()
         if "label" in patch:
@@ -61,6 +67,28 @@ def update_cockpit_ui(patch):
                     ui["labels"].pop(sid, None)
         if "order" in patch and isinstance(patch["order"], list):
             ui["order"] = [s for s in patch["order"] if isinstance(s, str)]
+        if "identity" in patch:
+            # Window name/color override, keyed by directory so it sticks across
+            # relaunches and covers every session under that dir.
+            cwd = (patch.get("cwd") or "").rstrip("/")
+            if cwd:
+                ent = ui["identity"].get(cwd, {})
+                if "name" in patch:
+                    name = (patch.get("name") or "").strip()[:60]
+                    if name:
+                        ent["name"] = name
+                    else:
+                        ent.pop("name", None)
+                if "color" in patch:
+                    color = (patch.get("color") or "").strip()
+                    if _is_hex_color(color):
+                        ent["color"] = color
+                    elif color == "":
+                        ent.pop("color", None)
+                if ent:
+                    ui["identity"][cwd] = ent
+                else:
+                    ui["identity"].pop(cwd, None)
         try:
             with open(COCKPIT_UI_PATH, "w") as f:
                 json.dump(ui, f, indent=2)
@@ -148,9 +176,32 @@ def _launcher_dirs():
     return out
 
 
-def enrich(sess):
+def _identity_overrides(ui):
+    """[(dir, name, color)] longest-first, from user identity overrides."""
+    items = []
+    for cwd, v in (ui.get("identity") or {}).items():
+        items.append((cwd.rstrip("/"), v.get("name", ""), v.get("color", "")))
+    items.sort(key=lambda t: len(t[0]), reverse=True)
+    return items
+
+
+def apply_identity(sess, overrides):
+    """User overrides win over anything derived — name and/or color."""
+    cwd = (sess.get("cwd") or "").rstrip("/")
+    for norm, name, color in overrides:
+        if norm and (cwd == norm or cwd.startswith(norm + "/")):
+            if name:
+                sess["window_name"] = name
+            if color:
+                sess["window_color"] = color
+            break
+    return sess
+
+
+def enrich(sess, overrides):
     """Give a session its window name/color by matching cwd to the launcher
-    config, unless it already carried explicit identity from its shell."""
+    config, unless it already carried explicit identity from its shell; then
+    apply any user override on top."""
     cwd = (sess.get("cwd") or "").rstrip("/")
     if not sess.get("window_name") or not sess.get("window_color"):
         for norm, name, color in _launcher_dirs():
@@ -160,11 +211,14 @@ def enrich(sess):
                 if not sess.get("window_color"):
                     sess["window_color"] = color
                 break
-    return sess
+    return apply_identity(sess, overrides)
 
 
 def cockpit_live():
     """Merge local + every configured remote collector into one machine list."""
+    ui = load_cockpit_ui()
+    overrides = _identity_overrides(ui)
+    labels = ui.get("labels", {})
     machines = []
     local = fetch_collector(LOCAL_COLLECTOR)
     machines.append({
@@ -172,24 +226,24 @@ def cockpit_live():
         "label": "this mac",
         "reachable": local is not None,
         "error": "" if local else "local collector down",
-        "sessions": [enrich(s) for s in local.get("sessions", [])] if local else [],
+        "sessions": [enrich(s, overrides) for s in local.get("sessions", [])] if local else [],
     })
     for host in cockpit_hosts():
         name = host.get("name", host["ssh"])
         with _tstate_lock:
             ts = dict(_tunnel_state.get(name, {}))
         data = fetch_collector(host["local_port"]) if ts.get("up") else None
+        # Remote sessions get user overrides but not the Mac launcher config.
+        sessions = [apply_identity(s, overrides) for s in data.get("sessions", [])] if data else []
         machines.append({
             "name": data.get("machine", name) if data else name,
             "label": host["ssh"],
             "reachable": data is not None,
             "error": "" if data else (ts.get("error") or "tunnel down"),
-            "sessions": data.get("sessions", []) if data else [],
+            "sessions": sessions,
         })
 
-    # Overlay user-set custom labels; hand the manual order to the client.
-    ui = load_cockpit_ui()
-    labels = ui.get("labels", {})
+    # Overlay user-set custom note labels; hand the manual order to the client.
     for m in machines:
         for s in m.get("sessions", []):
             s["custom_title"] = labels.get(s.get("session_id", ""), "")
@@ -670,8 +724,16 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         .scard .age { margin-left:auto; font-size:.68rem; color:#64748b; }
         .scard .proj { font-size:1.0rem; font-weight:650; margin-bottom:.25rem;
                        display:flex; align-items:center; gap:.42rem; }
-        .scard .swatch { width:.72rem; height:.72rem; border-radius:3px; flex:none;
-                         box-shadow:0 0 0 1px rgba(255,255,255,0.18) inset; }
+        .scard .swatch { position:relative; width:.85rem; height:.85rem; border-radius:3px;
+                         flex:none; box-shadow:0 0 0 1px rgba(255,255,255,0.18) inset;
+                         cursor:pointer; overflow:hidden; }
+        .scard .swatch input { position:absolute; inset:-4px; opacity:0; cursor:pointer;
+                               border:none; padding:0; background:none; }
+        .scard .pname { outline:none; border-radius:5px; padding:.05rem .25rem;
+                        margin:-.05rem -.15rem; cursor:text; }
+        .scard .pname:hover { background:rgba(255,255,255,0.05); }
+        .scard .pname:focus { background:rgba(255,255,255,0.09);
+                              box-shadow:0 0 0 1px rgba(148,163,184,.4); }
         .scard .idtag { font-size:.58rem; color:#5b6773; font-family:ui-monospace,Menlo,monospace;
                         margin-left:auto; }
         .scard .title { font-size:.8rem; color:#e2e8f0; opacity:.9; margin-bottom:.3rem;
@@ -1213,8 +1275,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
               const marker = s.state==='working'
                 ? '<span class="work-pip"></span>' : '<span class="sdot"></span>';
               const name = s.window_name || s.project || '?';
-              const swatch = s.window_color
-                ? `<span class="swatch" style="background:${escapeHtml(s.window_color)}"></span>` : '';
+              const cwd = s.cwd || '';
+              const color = s.window_color || '#888888';
+              const swatch = `<label class="swatch" style="background:${escapeHtml(color)}" title="click to recolor" onclick="event.stopPropagation()"><input type="color" class="swatchpick" data-cwd="${escapeHtml(cwd)}" value="${escapeHtml(color)}"></label>`;
               const subs = (s.subagents>0)
                 ? `<span class="subs">▷ ${s.subagents} sub${s.subagents>1?'s':''}</span>` : '';
               const ctx = s.context_tokens
@@ -1224,7 +1287,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
               const activity = `<div class="activity">${escapeHtml(s.activity||'')}</div>`;
               html += `<div class="scard s-${ui.c}" draggable="true" data-sid="${escapeHtml(s.session_id)}">
                 <div class="st">${marker}<span class="state">${ui.l}</span>${subs}${ctx}<span class="age">${agoSec(s.age)}</span></div>
-                <div class="proj">${swatch}${escapeHtml(name)}${idtag}</div>
+                <div class="proj">${swatch}<span class="pname" contenteditable="true" spellcheck="false" data-cwd="${escapeHtml(cwd)}">${escapeHtml(name)}</span>${idtag}</div>
                 <div class="title" contenteditable="true" spellcheck="false" data-sid="${escapeHtml(s.session_id)}">${escapeHtml(label)}</div>
                 ${activity}
                 <div class="foot">
@@ -1255,7 +1318,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
         let dragEl = null;
         function wireCockpitCards(){
-          // Editable labels — click, type, Enter/blur to save.
+          // Editable note labels — click, type, Enter/blur to save (per session).
           document.querySelectorAll('.scard .title').forEach(el=>{
             const card = el.closest('.scard');
             el.addEventListener('focus', ()=>{ cpBusy = true; card.draggable = false; });
@@ -1266,6 +1329,25 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             el.addEventListener('keydown', e=>{
               if(e.key==='Enter' || e.key==='Escape'){ e.preventDefault(); el.blur(); }
             });
+          });
+          // Editable window NAME — identity override, keyed by directory.
+          document.querySelectorAll('.scard .pname').forEach(el=>{
+            const card = el.closest('.scard');
+            el.addEventListener('focus', ()=>{ cpBusy = true; card.draggable = false; });
+            el.addEventListener('blur', ()=>{
+              cpBusy = false; card.draggable = true;
+              saveUI({identity: true, cwd: el.dataset.cwd, name: el.textContent});
+            });
+            el.addEventListener('keydown', e=>{
+              if(e.key==='Enter' || e.key==='Escape'){ e.preventDefault(); el.blur(); }
+            });
+          });
+          // Editable window COLOR — identity override, keyed by directory.
+          document.querySelectorAll('.scard .swatchpick').forEach(inp=>{
+            inp.addEventListener('focus', ()=>{ cpBusy = true; });
+            inp.addEventListener('input', ()=>{ inp.closest('.swatch').style.background = inp.value; });
+            inp.addEventListener('change', ()=>{ saveUI({identity: true, cwd: inp.dataset.cwd, color: inp.value}); });
+            inp.addEventListener('blur', ()=>{ cpBusy = false; });
           });
           // Drag to reorder.
           document.querySelectorAll('.scard').forEach(card=>{
