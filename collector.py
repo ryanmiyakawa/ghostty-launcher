@@ -29,8 +29,35 @@ MACHINE = os.environ.get("AGENT_COCKPIT_MACHINE") or socket.gethostname()
 STALE_AFTER = float(os.environ.get("AGENT_STALE_AFTER", "45"))
 ACTIVE_STATES = {"working", "starting"}
 
+# Persist the live roster to disk so a service restart (deploy, reboot) doesn't
+# blank the cockpit until every session happens to emit again. Idle sessions
+# waiting on you would otherwise vanish for minutes.
+STATE_FILE = os.environ.get("AGENT_COLLECTOR_STATE") or f"/tmp/agent-collector-{PORT}.json"
+
 _lock = threading.Lock()
 _sessions = {}  # session_id -> dict
+
+
+def _save_locked():
+    """Write the roster to disk. Caller holds _lock."""
+    try:
+        tmp = STATE_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(_sessions, f)
+        os.replace(tmp, STATE_FILE)
+    except OSError:
+        pass
+
+
+def load_state():
+    try:
+        with open(STATE_FILE) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return
+    if isinstance(data, dict):
+        with _lock:
+            _sessions.update(data)
 
 
 def _now():
@@ -45,6 +72,7 @@ def ingest(payload):
     with _lock:
         if state == "ended":
             _sessions.pop(sid, None)
+            _save_locked()
             return
         prev = _sessions.get(sid, {})
         _sessions[sid] = {
@@ -72,6 +100,7 @@ def ingest(payload):
             "first_seen": prev.get("first_seen", _now()),
             "last_seen": _now(),
         }
+        _save_locked()
 
 
 def snapshot():
@@ -122,6 +151,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    load_state()
     srv = ThreadingHTTPServer((HOST, PORT), Handler)
     print(f"agent-collector [{MACHINE}] on http://{HOST}:{PORT}")
     try:

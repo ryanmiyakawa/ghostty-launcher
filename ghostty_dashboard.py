@@ -345,13 +345,28 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
             min-height: 100vh;
             color: #e2e8f0;
             padding: 2rem;
+            /* Cockpit: deep navy with instrument-glow pools top and bottom-right. */
+            background:
+                radial-gradient(1300px 650px at 50% -12%, rgba(72,110,168,.20), transparent 62%),
+                radial-gradient(1000px 560px at 92% 112%, rgba(46,120,120,.14), transparent 58%),
+                linear-gradient(165deg, #0a0e17 0%, #0b111d 52%, #090d16 100%);
+            background-attachment: fixed;
+        }
+        /* Faint HUD grid + vignette, fixed behind everything. */
+        body::before {
+            content:''; position:fixed; inset:0; z-index:-1; pointer-events:none;
+            background-image:
+                linear-gradient(rgba(120,150,190,.045) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(120,150,190,.045) 1px, transparent 1px);
+            background-size: 46px 46px, 46px 46px;
+            mask-image: radial-gradient(120% 100% at 50% 0%, #000 55%, transparent 100%);
+            -webkit-mask-image: radial-gradient(120% 100% at 50% 0%, #000 55%, transparent 100%);
         }
 
-        .container { max-width: 1200px; margin: 0 auto; }
+        .container { max-width: 1200px; margin: 0 auto; position: relative; }
 
         header {
             display: flex;
@@ -705,11 +720,15 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         .machine-head .mlabel { font-family:ui-monospace,Menlo,monospace; text-transform:none;
                                 letter-spacing:0; opacity:.55; font-size:.72rem; }
         .machine-head .merr { color:#b5707c; text-transform:none; letter-spacing:0; font-size:.72rem; }
-        .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:.75rem; }
-        /* Desaturated full outline conveys state; no bright dots. */
-        .scard { background:rgba(255,255,255,0.035); border:1.5px solid rgba(255,255,255,0.10);
-                 border-radius:12px; padding:.9rem 1rem; position:relative;
-                 min-height:172px; display:flex; flex-direction:column;
+        .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(275px,1fr)); gap:.85rem; }
+        /* Desaturated full outline conveys state; no bright dots. Elevated
+           surface so cards float above the cockpit background. */
+        .scard { background:linear-gradient(180deg, rgba(30,41,59,.72), rgba(17,24,39,.72));
+                 border:1.5px solid rgba(255,255,255,0.10);
+                 border-radius:12px; padding:.85rem 1rem .9rem; position:relative; overflow:hidden;
+                 min-height:250px; display:flex; flex-direction:column;
+                 box-shadow:0 6px 22px -10px rgba(0,0,0,.65), 0 0 0 1px rgba(0,0,0,.25);
+                 backdrop-filter:blur(3px);
                  cursor:grab; transition:border-color .15s, box-shadow .15s, opacity .15s; }
         .scard:active { cursor:grabbing; }
         .scard.dragging { opacity:.4; }
@@ -722,12 +741,12 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         .scard .ctx { font-size:.64rem; color:#8b98a5; background:rgba(255,255,255,0.05);
                       padding:.05rem .4rem; border-radius:999px; font-family:ui-monospace,Menlo,monospace; }
         .scard .age { margin-left:auto; font-size:.68rem; color:#64748b; }
-        .scard .proj { font-size:1.0rem; font-weight:650; margin-bottom:.25rem;
-                       display:flex; align-items:center; gap:.42rem; }
-        /* Color chip — a solid block of the window color, framed by a matching
-           translucent border. Purely a display indicator; editing is via ✎. */
-        .scard .cbar { width:.7rem; height:1rem; border-radius:3px; flex:none;
-                       box-shadow:0 0 0 1px rgba(255,255,255,0.22) inset; }
+        /* The whole name row is the color band — the window color tints the
+           header full-bleed, so each card wears its Ghostty identity. */
+        .scard .proj { font-size:1.02rem; font-weight:650;
+                       display:flex; align-items:center; gap:.42rem;
+                       margin:-.85rem -1rem .5rem; padding:.5rem 1rem .45rem;
+                       border-bottom:1px solid rgba(255,255,255,0.07); }
         .scard .swatch { position:relative; width:.95rem; height:.95rem; border-radius:3px;
                          flex:none; box-shadow:0 0 0 1px rgba(255,255,255,0.35) inset;
                          cursor:pointer; overflow:hidden;
@@ -757,11 +776,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                               box-shadow:0 0 0 1px rgba(148,163,184,.4); }
         .scard .lastprompt { font-size:.72rem; color:#93a3b5; line-height:1.4; margin-bottom:.4rem;
                              padding-left:.5rem; border-left:2px solid rgba(148,163,184,.28);
-                             display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical;
+                             display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical;
                              overflow:hidden; }
         .scard .lastprompt::before { content:'you: '; color:#5b6773; }
         .scard .activity { font-size:.75rem; color:#9aa7b4; line-height:1.42; margin-bottom:.4rem;
-                           display:-webkit-box; -webkit-line-clamp:4; -webkit-box-orient:vertical;
+                           display:-webkit-box; -webkit-line-clamp:7; -webkit-box-orient:vertical;
                            overflow:hidden; flex:1; }
         .scard .foot { margin-top:auto; }
         .scard .detail { font-size:.7rem; color:#64748b; overflow:hidden;
@@ -1248,6 +1267,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         function fmtTok(n){ if(!n) return '';
           return n>=1000 ? (n/1000).toFixed(n>=100000?0:1).replace(/\.0$/,'')+'k' : ''+n; }
         function shortModel(m){ return (m||'').replace(/^claude-/,'').replace(/-\d{6,}$/,''); }
+        function hexA(hex, a){ hex=(hex||'').replace('#','');
+          if(hex.length===3) hex=hex.split('').map(c=>c+c).join('');
+          if(hex.length!==6) return `rgba(136,136,136,${a})`;
+          const n=parseInt(hex,16);
+          return `rgba(${(n>>16)&255},${(n>>8)&255},${n&255},${a})`; }
         function orderIndex(sid){ const i = manualOrder.indexOf(sid); return i<0 ? 1e6 : i; }
 
         async function saveUI(patch){
@@ -1294,7 +1318,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
               const name = s.window_name || s.project || '?';
               const cwd = s.cwd || '';
               const color = s.window_color || '#888888';
-              const cbar = `<span class="cbar" style="background:${escapeHtml(color)}"></span>`;
+              const headStyle = `background:linear-gradient(100deg, ${hexA(color,.42)} 0%, ${hexA(color,.14)} 55%, ${hexA(color,.02)} 100%);`;
               const colorinp = `<label class="swatch editonly" title="recolor" onclick="event.stopPropagation()"><input type="color" class="swatchpick" data-cwd="${escapeHtml(cwd)}" value="${escapeHtml(color)}"></label>`;
               const editbtn = `<button class="editbtn" title="edit name & color" onclick="event.stopPropagation()">✎</button>`;
               const subs = (s.subagents>0)
@@ -1306,9 +1330,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
               const lastp = s.last_prompt
                 ? `<div class="lastprompt" title="your latest prompt">${escapeHtml(s.last_prompt)}</div>` : '';
               const activity = `<div class="activity">${escapeHtml(s.activity||'')}</div>`;
-              html += `<div class="scard s-${ui.c}" draggable="true" data-sid="${escapeHtml(s.session_id)}">
+              html += `<div class="scard s-${ui.c}" draggable="true" data-sid="${escapeHtml(s.session_id)}" style="border-left:4px solid ${escapeHtml(color)};">
+                <div class="proj" style="${headStyle}"><span class="pname" contenteditable="false" spellcheck="false" data-cwd="${escapeHtml(cwd)}">${escapeHtml(name)}</span>${colorinp}${editbtn}${idtag}</div>
                 <div class="st">${marker}<span class="state">${ui.l}</span>${subs}${ctx}<span class="age">${agoSec(s.age)}</span></div>
-                <div class="proj">${cbar}<span class="pname" contenteditable="false" spellcheck="false" data-cwd="${escapeHtml(cwd)}">${escapeHtml(name)}</span>${colorinp}${editbtn}${idtag}</div>
                 <div class="title" contenteditable="true" spellcheck="false" data-sid="${escapeHtml(s.session_id)}">${escapeHtml(label)}</div>
                 ${lastp}
                 ${activity}
@@ -1392,8 +1416,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
           });
           document.querySelectorAll('.scard .swatchpick').forEach(inp=>{
             inp.addEventListener('input', ()=>{
-              const c = inp.closest('.proj').querySelector('.cbar');
-              if(c) c.style.background = inp.value;
+              const v = inp.value, proj = inp.closest('.proj'), card = inp.closest('.scard');
+              if(proj) proj.style.background = `linear-gradient(100deg, ${hexA(v,.42)} 0%, ${hexA(v,.14)} 55%, ${hexA(v,.02)} 100%)`;
+              if(card) card.style.borderLeft = '4px solid '+v;
             });
             inp.addEventListener('change', ()=>{ saveUI({identity: true, cwd: inp.dataset.cwd, color: inp.value}); });
           });
