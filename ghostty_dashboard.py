@@ -724,16 +724,28 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         .scard .age { margin-left:auto; font-size:.68rem; color:#64748b; }
         .scard .proj { font-size:1.0rem; font-weight:650; margin-bottom:.25rem;
                        display:flex; align-items:center; gap:.42rem; }
-        .scard .swatch { position:relative; width:.85rem; height:.85rem; border-radius:3px;
-                         flex:none; box-shadow:0 0 0 1px rgba(255,255,255,0.18) inset;
-                         cursor:pointer; overflow:hidden; }
+        /* Color chip — a solid block of the window color, framed by a matching
+           translucent border. Purely a display indicator; editing is via ✎. */
+        .scard .cbar { width:.7rem; height:1rem; border-radius:3px; flex:none;
+                       box-shadow:0 0 0 1px rgba(255,255,255,0.22) inset; }
+        .scard .swatch { position:relative; width:.95rem; height:.95rem; border-radius:3px;
+                         flex:none; box-shadow:0 0 0 1px rgba(255,255,255,0.35) inset;
+                         cursor:pointer; overflow:hidden;
+                         background-image:linear-gradient(135deg,#888,#bbb); }
         .scard .swatch input { position:absolute; inset:-4px; opacity:0; cursor:pointer;
                                border:none; padding:0; background:none; }
+        .scard .editonly { display:none; }
+        .scard.editing .editonly { display:inline-block; }
+        .scard .editbtn { background:none; border:none; color:#5b6773; cursor:pointer;
+                          font-size:.78rem; line-height:1; padding:.1rem .2rem; border-radius:4px;
+                          opacity:0; transition:opacity .12s, color .12s; }
+        .scard:hover .editbtn, .scard.editing .editbtn { opacity:1; }
+        .scard .editbtn:hover { color:#cbd5e1; background:rgba(255,255,255,0.06); }
+        .scard.editing .editbtn { color:#7faa8f; opacity:1; }
         .scard .pname { outline:none; border-radius:5px; padding:.05rem .25rem;
-                        margin:-.05rem -.15rem; cursor:text; }
-        .scard .pname:hover { background:rgba(255,255,255,0.05); }
-        .scard .pname:focus { background:rgba(255,255,255,0.09);
-                              box-shadow:0 0 0 1px rgba(148,163,184,.4); }
+                        margin:-.05rem -.15rem; cursor:default; }
+        .scard.editing .pname { cursor:text; background:rgba(255,255,255,0.09);
+                                box-shadow:0 0 0 1px rgba(148,163,184,.4); }
         .scard .idtag { font-size:.58rem; color:#5b6773; font-family:ui-monospace,Menlo,monospace;
                         margin-left:auto; }
         .scard .title { font-size:.8rem; color:#e2e8f0; opacity:.9; margin-bottom:.3rem;
@@ -743,6 +755,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         .scard .title:hover { background:rgba(255,255,255,0.05); }
         .scard .title:focus { background:rgba(255,255,255,0.09);
                               box-shadow:0 0 0 1px rgba(148,163,184,.4); }
+        .scard .lastprompt { font-size:.72rem; color:#93a3b5; line-height:1.4; margin-bottom:.4rem;
+                             padding-left:.5rem; border-left:2px solid rgba(148,163,184,.28);
+                             display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical;
+                             overflow:hidden; }
+        .scard .lastprompt::before { content:'you: '; color:#5b6773; }
         .scard .activity { font-size:.75rem; color:#9aa7b4; line-height:1.42; margin-bottom:.4rem;
                            display:-webkit-box; -webkit-line-clamp:4; -webkit-box-orient:vertical;
                            overflow:hidden; flex:1; }
@@ -1277,18 +1294,23 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
               const name = s.window_name || s.project || '?';
               const cwd = s.cwd || '';
               const color = s.window_color || '#888888';
-              const swatch = `<label class="swatch" style="background:${escapeHtml(color)}" title="click to recolor" onclick="event.stopPropagation()"><input type="color" class="swatchpick" data-cwd="${escapeHtml(cwd)}" value="${escapeHtml(color)}"></label>`;
+              const cbar = `<span class="cbar" style="background:${escapeHtml(color)}"></span>`;
+              const colorinp = `<label class="swatch editonly" title="recolor" onclick="event.stopPropagation()"><input type="color" class="swatchpick" data-cwd="${escapeHtml(cwd)}" value="${escapeHtml(color)}"></label>`;
+              const editbtn = `<button class="editbtn" title="edit name & color" onclick="event.stopPropagation()">✎</button>`;
               const subs = (s.subagents>0)
                 ? `<span class="subs">▷ ${s.subagents} sub${s.subagents>1?'s':''}</span>` : '';
               const ctx = s.context_tokens
                 ? `<span class="ctx" title="context tokens / model">${fmtTok(s.context_tokens)}${s.model?(' · '+escapeHtml(shortModel(s.model))):''}</span>` : '';
               const idtag = `<span class="idtag">${escapeHtml((s.session_id||'').slice(0,6))}</span>`;
               const label = s.custom_title || s.title || '';
+              const lastp = s.last_prompt
+                ? `<div class="lastprompt" title="your latest prompt">${escapeHtml(s.last_prompt)}</div>` : '';
               const activity = `<div class="activity">${escapeHtml(s.activity||'')}</div>`;
               html += `<div class="scard s-${ui.c}" draggable="true" data-sid="${escapeHtml(s.session_id)}">
                 <div class="st">${marker}<span class="state">${ui.l}</span>${subs}${ctx}<span class="age">${agoSec(s.age)}</span></div>
-                <div class="proj">${swatch}<span class="pname" contenteditable="true" spellcheck="false" data-cwd="${escapeHtml(cwd)}">${escapeHtml(name)}</span>${idtag}</div>
+                <div class="proj">${cbar}<span class="pname" contenteditable="false" spellcheck="false" data-cwd="${escapeHtml(cwd)}">${escapeHtml(name)}</span>${colorinp}${editbtn}${idtag}</div>
                 <div class="title" contenteditable="true" spellcheck="false" data-sid="${escapeHtml(s.session_id)}">${escapeHtml(label)}</div>
+                ${lastp}
                 ${activity}
                 <div class="foot">
                   <div class="detail">${escapeHtml(s.detail||'')||'&nbsp;'}</div>
@@ -1308,6 +1330,29 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
           document.getElementById('cockpit-sub').textContent =
             bits.join(' · ') + ' · ' + new Date().toLocaleTimeString();
           document.title = (need ? `(${need}!) ` : '') + 'Ghostty Launcher';
+        }
+
+        function enterEdit(card){
+          const pname = card.querySelector('.pname');
+          const btn = card.querySelector('.editbtn');
+          cpBusy = true; card.draggable = false; card.classList.add('editing');
+          if(btn) btn.textContent = '✓';
+          if(pname){
+            pname.contentEditable = 'true';
+            pname.focus();
+            const r = document.createRange(); r.selectNodeContents(pname); r.collapse(false);
+            const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r);
+          }
+        }
+        function exitEdit(card){
+          const pname = card.querySelector('.pname');
+          const btn = card.querySelector('.editbtn');
+          if(pname){
+            pname.contentEditable = 'false';
+            saveUI({identity: true, cwd: pname.dataset.cwd, name: pname.textContent.trim()});
+          }
+          if(btn) btn.textContent = '✎';
+          card.classList.remove('editing'); card.draggable = true; cpBusy = false;
         }
 
         function persistOrder(){
@@ -1330,24 +1375,27 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
               if(e.key==='Enter' || e.key==='Escape'){ e.preventDefault(); el.blur(); }
             });
           });
-          // Editable window NAME — identity override, keyed by directory.
-          document.querySelectorAll('.scard .pname').forEach(el=>{
-            const card = el.closest('.scard');
-            el.addEventListener('focus', ()=>{ cpBusy = true; card.draggable = false; });
-            el.addEventListener('blur', ()=>{
-              cpBusy = false; card.draggable = true;
-              saveUI({identity: true, cwd: el.dataset.cwd, name: el.textContent});
-            });
-            el.addEventListener('keydown', e=>{
-              if(e.key==='Enter' || e.key==='Escape'){ e.preventDefault(); el.blur(); }
+          // ✎ toggles an edit panel: name becomes editable + colorpicker appears.
+          // Both are directory-keyed identity overrides. Edit mode is sticky
+          // (clicking the colorpicker won't dismiss it); ✎/Enter/Escape ends it.
+          document.querySelectorAll('.scard .editbtn').forEach(btn=>{
+            const card = btn.closest('.scard');
+            btn.addEventListener('click', e=>{
+              e.stopPropagation();
+              card.classList.contains('editing') ? exitEdit(card) : enterEdit(card);
             });
           });
-          // Editable window COLOR — identity override, keyed by directory.
+          document.querySelectorAll('.scard .pname').forEach(el=>{
+            el.addEventListener('keydown', e=>{
+              if(e.key==='Enter' || e.key==='Escape'){ e.preventDefault(); exitEdit(el.closest('.scard')); }
+            });
+          });
           document.querySelectorAll('.scard .swatchpick').forEach(inp=>{
-            inp.addEventListener('focus', ()=>{ cpBusy = true; });
-            inp.addEventListener('input', ()=>{ inp.closest('.swatch').style.background = inp.value; });
+            inp.addEventListener('input', ()=>{
+              const c = inp.closest('.proj').querySelector('.cbar');
+              if(c) c.style.background = inp.value;
+            });
             inp.addEventListener('change', ()=>{ saveUI({identity: true, cwd: inp.dataset.cwd, color: inp.value}); });
-            inp.addEventListener('blur', ()=>{ cpBusy = false; });
           });
           // Drag to reorder.
           document.querySelectorAll('.scard').forEach(card=>{

@@ -151,7 +151,9 @@ def main():
     elif event in ("PreToolUse", "PostToolUse"):
         payload["detail"] = hook.get("tool_name", "")
     elif event == "UserPromptSubmit":
-        payload["title"] = " ".join((hook.get("prompt") or "").split())[:90]
+        prompt = " ".join((hook.get("prompt") or "").split())
+        payload["title"] = prompt[:90]        # first-wins: stable conversation name
+        payload["last_prompt"] = prompt[:220]  # latest-wins: what you just asked
 
     # What Claude last said + context size/model — richest orientation signals.
     # Skip on the highest frequency event (PreToolUse) to keep tool calls snappy.

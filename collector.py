@@ -57,6 +57,8 @@ def ingest(payload):
             "detail": payload.get("detail", ""),
             # First prompt wins — a stable name for the conversation.
             "title": prev.get("title") or payload.get("title", ""),
+            # Latest prompt wins — the thing you most recently asked for.
+            "last_prompt": payload.get("last_prompt") or prev.get("last_prompt", ""),
             # Latest "what Claude just said" snippet (changes as work progresses).
             "activity": payload.get("activity") or prev.get("activity", ""),
             # Context size + model, derived from the transcript's usage block.
