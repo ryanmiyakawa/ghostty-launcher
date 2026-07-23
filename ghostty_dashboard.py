@@ -6,6 +6,7 @@ A browser-based launcher with configuration and color picker.
 
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -349,12 +350,51 @@ def launch_ghostty(directory, background, foreground="#ffffff", ssh=None, title=
 HS_FOCUS_PORT = int(os.environ.get("AGENT_HS_FOCUS_PORT", "8460"))
 
 
-def focus_window(title, alt="", hint=""):
+def transcript_hint(cwd, sid):
+    """Freshest AI task summary for a session, read straight from its Claude
+    Code transcript (~/.claude/projects/<munged-cwd>/<sid>.jsonl). Claude Code
+    retitles unlocked windows with exactly this text, so it's the strongest
+    focus needle — and unlike the hook-delivered hint it can't go stale on a
+    quiet session. Fully defensive; returns '' on any problem."""
+    try:
+        sid = re.sub(r"[^A-Za-z0-9-]", "", sid or "")
+        cwd = (cwd or "").rstrip("/")
+        if not sid or not cwd:
+            return ""
+        proj = re.sub(r"[^A-Za-z0-9-]", "-", cwd)
+        path = os.path.expanduser(f"~/.claude/projects/{proj}/{sid}.jsonl")
+        if not os.path.exists(path):
+            return ""
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - 131072))
+            tail = f.read().decode("utf-8", "replace")
+        hint = ""
+        for line in tail.splitlines():
+            if '"ai-title"' not in line:
+                continue
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+            if obj.get("type") == "ai-title" and obj.get("aiTitle"):
+                hint = " ".join(str(obj["aiTitle"]).split())[:120]
+        return hint
+    except Exception:
+        return ""
+
+
+def focus_window(title, alt="", hint="", sid="", cwd=""):
     """Ask Hammerspoon to focus the Ghostty window matching one of the needles,
     tried in order: `title` (launcher-stamped --title), `alt` (cwd basename),
     `hint` (Claude Code's AI task summary — its live window-retitle text, for
-    windows not launched from the Launcher). Always returns JSON; a
+    windows not launched from the Launcher). When sid+cwd are given, the hint
+    is re-read fresh from the session transcript at focus time, since the
+    hook-delivered hint goes stale on quiet sessions. Always returns JSON; a
     missing/broken Hammerspoon → {ok: false}."""
+    fresh = transcript_hint(cwd, sid)
+    hint = fresh or hint
     if not (title or alt or hint):
         return {"ok": False, "error": "no title"}
     try:
@@ -1378,6 +1418,117 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
           } catch(e){}
         }
 
+        const PMODES = {plan:{t:'plan',c:'pm-plan'},
+                        acceptEdits:{t:'auto-edit',c:'pm-auto'},
+                        bypassPermissions:{t:'BYPASS',c:'pm-bypass'}};
+
+        // Everything a card renders, precomputed once per session per tick so
+        // the full-rebuild and in-place-patch paths share identical values.
+        function cardBits(s){
+          const ui = CUI[s.state] || {l:s.state, c:'stale'};
+          const cwd = s.cwd || '';
+          const color = s.window_color || '#888888';
+          const focusTitle = (s.launch_title || s.window_name || '').trim();
+          const cwdBase = (cwd.replace(/\/+$/,'').split('/').pop() || '').trim();
+          const focusHint = (s.title_hint || '').trim();
+          const canFocus = !!((s.machine==='mac') && (focusTitle || cwdBase || focusHint));
+          const pmInfo = PMODES[s.permission_mode];
+          const ctxCls = s.context_tokens>=CTX_CRIT ? ' ctx-crit'
+                       : s.context_tokens>=CTX_WARN ? ' ctx-warn' : '';
+          const marker = s.state==='working'
+            ? '<span class="work-pip"></span>' : '<span class="sdot"></span>';
+          const stCore = marker
+            + `<span class="state">${escapeHtml(ui.l)}</span>`
+            + (pmInfo ? `<span class="pmode ${pmInfo.c}" title="permission mode: ${escapeHtml(s.permission_mode)}">${pmInfo.t}</span>` : '')
+            + ((s.subagents>0) ? `<span class="subs">▷ ${s.subagents} sub${s.subagents>1?'s':''}</span>` : '')
+            + (s.context_tokens ? `<span class="ctx${ctxCls}" title="context tokens / model${ctxCls?' — time to /compact':''}">${fmtTok(s.context_tokens)}${s.model?(' · '+escapeHtml(shortModel(s.model))):''}</span>` : '');
+          return {
+            sid: s.session_id || '',
+            cls: `scard s-${ui.c}${canFocus?' focusable':''}`,
+            canFocus,
+            ft: focusTitle, fa: cwdBase, fh: focusHint,
+            name: s.window_name || s.project || '?',
+            cwd, color,
+            headStyle: `background:linear-gradient(100deg, ${hexA(color,.42)} 0%, ${hexA(color,.14)} 55%, ${hexA(color,.02)} 100%);`,
+            stCore,
+            age: agoSec(s.age),
+            label: s.custom_title || s.title || '',
+            lastp: s.last_prompt || '',
+            activity: s.activity || '',
+            detail: s.detail || '',
+          };
+        }
+
+        // Fingerprint of the last full render, and the bits it applied, so the
+        // 1.5s poll can patch in place instead of nuking innerHTML — rebuilding
+        // destroys the node under the cursor and makes it flicker arrow<->hand.
+        let cockpitRoster = '';
+        let appliedBits = {};   // sid -> bits last written to the DOM
+
+        function patchCard(card, b){
+          const prev = appliedBits[b.sid] || {};
+          if(prev.cls !== b.cls) card.className = b.cls;
+          if(prev.ft !== b.ft) card.dataset.ft = b.ft;
+          if(prev.fa !== b.fa) card.dataset.fa = b.fa;
+          if(prev.fh !== b.fh) card.dataset.fh = b.fh;
+          if(prev.name !== b.name){
+            const el = card.querySelector('.pname'); if(el) el.textContent = b.name;
+          }
+          if(prev.headStyle !== b.headStyle){
+            const el = card.querySelector('.proj'); if(el) el.setAttribute('style', b.headStyle);
+          }
+          if(prev.color !== b.color){
+            const el = card.querySelector('.swatchpick'); if(el) el.value = b.color;
+          }
+          const st = card.querySelector('.st');
+          if(st){
+            if(prev.stCore !== b.stCore){
+              st.innerHTML = b.stCore + `<span class="age">${escapeHtml(b.age)}</span>`;
+            } else if(prev.age !== b.age){
+              const el = st.querySelector('.age'); if(el) el.textContent = b.age;
+            }
+          }
+          if(prev.label !== b.label){
+            const el = card.querySelector('.title'); if(el) el.textContent = b.label;
+          }
+          if(prev.lastp !== b.lastp){
+            const el = card.querySelector('.lastprompt'); if(el) el.textContent = b.lastp;
+          }
+          if(prev.activity !== b.activity){
+            const el = card.querySelector('.activity'); if(el) el.textContent = b.activity;
+          }
+          if(prev.detail !== b.detail){
+            const el = card.querySelector('.detail');
+            if(el){ el.textContent = b.detail || ' '; el.title = b.detail; }
+          }
+          if(prev.cwd !== b.cwd){
+            const el = card.querySelector('.cwd'); if(el) el.textContent = b.cwd;
+          }
+          appliedBits[b.sid] = b;
+        }
+
+        function cardHTML(b){
+          const colorinp = `<label class="swatch editonly" title="recolor" onclick="event.stopPropagation()"><input type="color" class="swatchpick" data-cwd="${escapeHtml(b.cwd)}" value="${escapeHtml(b.color)}"></label>`;
+          const editbtn = `<button class="editbtn" title="edit name & color" onclick="event.stopPropagation()">✎</button>`;
+          const focusbtn = b.canFocus
+            ? `<button class="focusbtn" title="focus Ghostty window" onclick="event.stopPropagation()">⤢</button>` : '';
+          const focusData = b.canFocus
+            ? ` data-ft="${escapeHtml(b.ft)}" data-fa="${escapeHtml(b.fa)}" data-fh="${escapeHtml(b.fh)}"` : '';
+          const lastp = b.lastp
+            ? `<div class="lastprompt" title="your latest prompt">${escapeHtml(b.lastp)}</div>` : '';
+          return `<div class="${b.cls}" draggable="true" data-sid="${escapeHtml(b.sid)}"${focusData}>
+            <div class="proj" style="${b.headStyle}"><span class="pname" contenteditable="false" spellcheck="false" data-cwd="${escapeHtml(b.cwd)}">${escapeHtml(b.name)}</span>${colorinp}${editbtn}${focusbtn}<span class="idtag">${escapeHtml(b.sid.slice(0,6))}</span></div>
+            <div class="st">${b.stCore}<span class="age">${escapeHtml(b.age)}</span></div>
+            <div class="title" contenteditable="false" spellcheck="false" data-sid="${escapeHtml(b.sid)}">${escapeHtml(b.label)}</div>
+            ${lastp}
+            <div class="activity">${escapeHtml(b.activity)}</div>
+            <div class="foot">
+              <div class="detail" title="${escapeHtml(b.detail)}">${escapeHtml(b.detail)||'&nbsp;'}</div>
+              <div class="cwd">${escapeHtml(b.cwd)}</div>
+            </div>
+          </div>`;
+        }
+
         async function cockpitTick(){
           if(cpBusy) return;   // never clobber an in-progress edit / drag
           let data;
@@ -1385,7 +1536,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
           catch(e){ return; }
           const machines = data.machines || [];
           manualOrder = data.order || [];
-          let need=0, work=0, total=0, html='';
+          let need=0, work=0, total=0;
+          const groups = [];
           for(const m of machines){
             const sess = (m.sessions||[]).slice().sort((a,b)=>{
               const oa=orderIndex(a.session_id), ob=orderIndex(b.session_id);
@@ -1394,78 +1546,46 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             total += sess.length;
             need += sess.filter(s=>s.state==='needs_input').length;
             work += sess.filter(s=>s.state==='working').length;
-            const mdot = m.reachable ? '#6f9e80' : '#b06e7c';
-            html += `<div><div class="machine-head">
-                <span class="mdot" style="background:${mdot}"></span>
-                <span>${escapeHtml(m.name)}</span>
-                <span class="mlabel">${escapeHtml(m.label||'')}</span>
-                ${m.reachable?'':`<span class="merr">· ${escapeHtml(m.error||'unreachable')}</span>`}
-              </div>`;
-            if(!sess.length){
-              html += `<div class="empty">${m.reachable?'no active sessions':'—'}</div></div>`;
-              continue;
-            }
-            html += '<div class="grid">';
-            for(const s of sess){
-              const ui = CUI[s.state] || {l:s.state, c:'stale'};
-              const marker = s.state==='working'
-                ? '<span class="work-pip"></span>' : '<span class="sdot"></span>';
-              const name = s.window_name || s.project || '?';
-              const cwd = s.cwd || '';
-              const color = s.window_color || '#888888';
-              const headStyle = `background:linear-gradient(100deg, ${hexA(color,.42)} 0%, ${hexA(color,.14)} 55%, ${hexA(color,.02)} 100%);`;
-              const colorinp = `<label class="swatch editonly" title="recolor" onclick="event.stopPropagation()"><input type="color" class="swatchpick" data-cwd="${escapeHtml(cwd)}" value="${escapeHtml(color)}"></label>`;
-              const editbtn = `<button class="editbtn" title="edit name & color" onclick="event.stopPropagation()">✎</button>`;
-              // Focus-match candidates, tried in order by Hammerspoon:
-              // 1. launcher-config name (what --title stamps on the window —
-              //    the display name may be a user override, so don't use that),
-              // 2. cwd basename, 3. Claude Code's AI task summary (its live
-              //    window-retitle text — catches windows not launched from the
-              //    Launcher). Stored on the card so both the ⤢ button and a
-              //    plain card click share them.
-              const focusTitle = (s.launch_title || s.window_name || '').trim();
-              const cwdBase = (cwd.replace(/\/+$/,'').split('/').pop() || '').trim();
-              const focusHint = (s.title_hint || '').trim();
-              const canFocus = (s.machine==='mac') && (focusTitle || cwdBase || focusHint);
-              const focusData = canFocus
-                ? ` data-ft="${escapeHtml(focusTitle)}" data-fa="${escapeHtml(cwdBase)}" data-fh="${escapeHtml(focusHint)}"` : '';
-              const focusbtn = canFocus
-                ? `<button class="focusbtn" title="focus Ghostty window" onclick="event.stopPropagation()">⤢</button>` : '';
-              const subs = (s.subagents>0)
-                ? `<span class="subs">▷ ${s.subagents} sub${s.subagents>1?'s':''}</span>` : '';
-              const PMODES = {plan:{t:'plan',c:'pm-plan'},
-                              acceptEdits:{t:'auto-edit',c:'pm-auto'},
-                              bypassPermissions:{t:'BYPASS',c:'pm-bypass'}};
-              const pmInfo = PMODES[s.permission_mode];
-              const pmode = pmInfo
-                ? `<span class="pmode ${pmInfo.c}" title="permission mode: ${escapeHtml(s.permission_mode)}">${pmInfo.t}</span>` : '';
-              const ctxCls = s.context_tokens>=CTX_CRIT ? ' ctx-crit'
-                           : s.context_tokens>=CTX_WARN ? ' ctx-warn' : '';
-              const ctxTip = ctxCls ? ' — time to /compact' : '';
-              const ctx = s.context_tokens
-                ? `<span class="ctx${ctxCls}" title="context tokens / model${ctxTip}">${fmtTok(s.context_tokens)}${s.model?(' · '+escapeHtml(shortModel(s.model))):''}</span>` : '';
-              const idtag = `<span class="idtag">${escapeHtml((s.session_id||'').slice(0,6))}</span>`;
-              const label = s.custom_title || s.title || '';
-              const lastp = s.last_prompt
-                ? `<div class="lastprompt" title="your latest prompt">${escapeHtml(s.last_prompt)}</div>` : '';
-              const activity = `<div class="activity">${escapeHtml(s.activity||'')}</div>`;
-              html += `<div class="scard s-${ui.c}${canFocus?' focusable':''}" draggable="true" data-sid="${escapeHtml(s.session_id)}"${focusData}>
-                <div class="proj" style="${headStyle}"><span class="pname" contenteditable="false" spellcheck="false" data-cwd="${escapeHtml(cwd)}">${escapeHtml(name)}</span>${colorinp}${editbtn}${focusbtn}${idtag}</div>
-                <div class="st">${marker}<span class="state">${ui.l}</span>${pmode}${subs}${ctx}<span class="age">${agoSec(s.age)}</span></div>
-                <div class="title" contenteditable="false" spellcheck="false" data-sid="${escapeHtml(s.session_id)}">${escapeHtml(label)}</div>
-                ${lastp}
-                ${activity}
-                <div class="foot">
-                  <div class="detail" title="${escapeHtml(s.detail||'')}">${escapeHtml(s.detail||'')||'&nbsp;'}</div>
-                  <div class="cwd">${escapeHtml(s.cwd||'')}</div>
-                </div>
-              </div>`;
-            }
-            html += '</div></div>';
+            groups.push({m, bits: sess.map(cardBits)});
           }
-          document.getElementById('machines').innerHTML = total ? html :
-            '<div class="none">No sessions reporting yet.<br>Start a Claude session on any wired machine.</div>';
-          wireCockpitCards();
+          // Structural fingerprint: machine roster/health + card list/order +
+          // per-card structure (focusability, has-lastprompt). While it's
+          // unchanged we patch nodes in place; a rebuild only happens when the
+          // layout itself changes.
+          const roster = JSON.stringify(groups.map(g=>[
+            g.m.name, g.m.label, g.m.reachable, g.m.error,
+            g.bits.map(b=>[b.sid, b.canFocus, !!b.lastp])
+          ]));
+          const container = document.getElementById('machines');
+          if(total && roster === cockpitRoster && container.querySelector('.scard')){
+            for(const g of groups) for(const b of g.bits){
+              const card = container.querySelector(`.scard[data-sid="${b.sid}"]`);
+              if(card) patchCard(card, b);
+            }
+          } else {
+            let html = '';
+            for(const g of groups){
+              const m = g.m;
+              const mdot = m.reachable ? '#6f9e80' : '#b06e7c';
+              html += `<div><div class="machine-head">
+                  <span class="mdot" style="background:${mdot}"></span>
+                  <span>${escapeHtml(m.name)}</span>
+                  <span class="mlabel">${escapeHtml(m.label||'')}</span>
+                  ${m.reachable?'':`<span class="merr">· ${escapeHtml(m.error||'unreachable')}</span>`}
+                </div>`;
+              if(!g.bits.length){
+                html += `<div class="empty">${m.reachable?'no active sessions':'—'}</div></div>`;
+                continue;
+              }
+              html += '<div class="grid">' + g.bits.map(cardHTML).join('') + '</div></div>';
+            }
+            container.innerHTML = total ? html :
+              '<div class="none">No sessions reporting yet.<br>Start a Claude session on any wired machine.</div>';
+            wireCockpitCards();
+            cockpitRoster = roster;
+            appliedBits = {};
+            for(const g of groups) for(const b of g.bits) appliedBits[b.sid] = b;
+          }
           const bits = [];
           if(need) bits.push(need+' need you');
           if(work) bits.push(work+' working');
@@ -1515,12 +1635,17 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         let justDragged = false;  // suppress the click that trails a drag-reorder
 
         // Raise the Ghostty window for a card, using its candidate needles
-        // (stamped title, cwd basename, AI task summary) in order.
+        // (stamped title, cwd basename, AI task summary) in order. sid+cwd let
+        // the server re-read the freshest AI summary from the transcript, since
+        // the hook-delivered hint goes stale on quiet sessions.
         function sendFocus(card){
           if(!card || !card.classList.contains('focusable')) return;
+          const pname = card.querySelector('.pname');
           fetch('/api/focus?title=' + encodeURIComponent(card.dataset.ft || '')
                 + '&alt=' + encodeURIComponent(card.dataset.fa || '')
-                + '&hint=' + encodeURIComponent(card.dataset.fh || '')).catch(()=>{});
+                + '&hint=' + encodeURIComponent(card.dataset.fh || '')
+                + '&sid=' + encodeURIComponent(card.dataset.sid || '')
+                + '&cwd=' + encodeURIComponent((pname && pname.dataset.cwd) || '')).catch(()=>{});
         }
         function wireCockpitCards(){
           // Sublabel note — editable only inside edit mode; Enter/Escape ends the
@@ -1652,7 +1777,9 @@ class Handler(BaseHTTPRequestHandler):
             q = parse_qs(urlparse(self.path).query)
             self._send_response(json.dumps(focus_window(q.get("title", [""])[0],
                                                         q.get("alt", [""])[0],
-                                                        q.get("hint", [""])[0])),
+                                                        q.get("hint", [""])[0],
+                                                        q.get("sid", [""])[0],
+                                                        q.get("cwd", [""])[0])),
                                 "application/json")
         elif self.path.startswith("/api/history"):
             q = parse_qs(urlparse(self.path).query)
