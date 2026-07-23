@@ -13,7 +13,7 @@ import time
 import urllib.request
 import webbrowser
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 CONFIG_PATH = os.path.expanduser("~/.claude/ghostty_dashboard_config.json")
 PORT = 8457
@@ -312,7 +312,7 @@ def save_config(projects):
         json.dump(projects, f, indent=2)
 
 
-def launch_ghostty(directory, background, foreground="#ffffff", ssh=None):
+def launch_ghostty(directory, background, foreground="#ffffff", ssh=None, title=None):
     directory = os.path.expanduser(directory)
     ghostty_bin = "/Applications/Ghostty.app/Contents/MacOS/ghostty"
     cmd = [
@@ -320,6 +320,11 @@ def launch_ghostty(directory, background, foreground="#ffffff", ssh=None):
         f"--background={background}",
         f"--foreground={foreground}",
     ]
+    if title:
+        # `title` is a Ghostty config key: it both sets the window title AND locks
+        # it against shell/OSC overrides, so the Cockpit can focus the window by
+        # this deterministic name (project name) later via Hammerspoon.
+        cmd.append(f"--title={title}")
     if ssh:
         # SSH into remote server
         cmd.extend(["-e", f"ssh {ssh}"])
@@ -332,6 +337,25 @@ def launch_ghostty(directory, background, foreground="#ffffff", ssh=None):
     except Exception as e:
         print(f"Error launching ghostty: {e}")
         return False
+
+
+# Hammerspoon runs a tiny focus server on 127.0.0.1:8460 (see
+# deploy/hammerspoon-cockpit.lua). We proxy to it so the browser can raise a
+# Ghostty window by its (project-name) title without any cross-origin fuss.
+HS_FOCUS_PORT = int(os.environ.get("AGENT_HS_FOCUS_PORT", "8460"))
+
+
+def focus_window(title):
+    """Ask Hammerspoon to focus the Ghostty window whose title matches. Always
+    returns JSON; a missing/broken Hammerspoon just yields {ok: false}."""
+    if not title:
+        return {"ok": False, "error": "no title"}
+    try:
+        url = f"http://127.0.0.1:{HS_FOCUS_PORT}/focus?title={quote(title)}"
+        with urllib.request.urlopen(url, timeout=1.0) as r:
+            return json.loads(r.read().decode())
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 HTML_TEMPLATE = r"""<!DOCTYPE html>
@@ -348,23 +372,44 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             min-height: 100vh;
             color: #e2e8f0;
             padding: 2rem;
-            /* Cockpit: deep navy with instrument-glow pools top and bottom-right. */
+            /* Synthwave: near-black base with magenta / violet / cyan neon pools. */
             background:
-                radial-gradient(1300px 650px at 50% -12%, rgba(72,110,168,.20), transparent 62%),
-                radial-gradient(1000px 560px at 92% 112%, rgba(46,120,120,.14), transparent 58%),
-                linear-gradient(165deg, #0a0e17 0%, #0b111d 52%, #090d16 100%);
+                radial-gradient(1000px 560px at 12% -8%, rgba(255,45,149,.16), transparent 60%),
+                radial-gradient(1100px 620px at 92% -4%, rgba(130,50,235,.20), transparent 60%),
+                radial-gradient(900px 700px at 78% 112%, rgba(0,225,255,.10), transparent 58%),
+                linear-gradient(180deg, #06040c 0%, #0a0616 52%, #06040c 100%);
             background-attachment: fixed;
         }
-        /* Faint HUD grid + vignette, fixed behind everything. */
+        /* Synthwave perspective grid receding to a glowing horizon near the
+           bottom of the viewport. Fixed + purely CSS so the 1.5s re-render
+           never touches it. */
         body::before {
-            content:''; position:fixed; inset:0; z-index:-1; pointer-events:none;
+            content:''; position:fixed; left:0; right:0; bottom:0; height:42vh; z-index:-2;
+            pointer-events:none;
             background-image:
-                linear-gradient(rgba(120,150,190,.045) 1px, transparent 1px),
-                linear-gradient(90deg, rgba(120,150,190,.045) 1px, transparent 1px);
-            background-size: 46px 46px, 46px 46px;
-            mask-image: radial-gradient(120% 100% at 50% 0%, #000 55%, transparent 100%);
-            -webkit-mask-image: radial-gradient(120% 100% at 50% 0%, #000 55%, transparent 100%);
+                linear-gradient(rgba(255,45,149,.40) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(0,225,255,.30) 1px, transparent 1px);
+            background-size: 100% 34px, 3.2vw 100%;
+            transform: perspective(320px) rotateX(64deg);
+            transform-origin: bottom center;
+            mask-image: linear-gradient(to top, #000 0%, rgba(0,0,0,.5) 45%, transparent 100%);
+            -webkit-mask-image: linear-gradient(to top, #000 0%, rgba(0,0,0,.5) 45%, transparent 100%);
+            opacity:.55;
         }
+        /* Glowing horizon line where the grid meets the darkness, plus very
+           faint scanlines, with a slow CSS-only neon hum (no JS loop). */
+        body::after {
+            content:''; position:fixed; inset:0; z-index:-1; pointer-events:none;
+            background:
+                linear-gradient(to bottom,
+                    transparent calc(58vh - 2px),
+                    rgba(255,90,185,.55) 58vh,
+                    rgba(140,90,255,0) calc(58vh + 4px)),
+                repeating-linear-gradient(to bottom,
+                    rgba(255,255,255,.014) 0 1px, transparent 1px 3px);
+            animation: neonHum 7s ease-in-out infinite;
+        }
+        @keyframes neonHum { 0%,100%{opacity:.85;} 50%{opacity:.55;} }
 
         .container { max-width: 1200px; margin: 0 auto; position: relative; }
 
@@ -375,7 +420,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             margin-bottom: 2rem;
         }
 
-        h1 { font-size: 1.75rem; font-weight: 600; }
+        h1 { font-size: 1.75rem; font-weight: 600; letter-spacing: .01em;
+             text-shadow: 0 0 22px rgba(255,45,149,.35), 0 0 8px rgba(130,50,235,.35); }
 
         .btn {
             padding: 0.6rem 1.2rem;
@@ -565,7 +611,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             transition: all 0.2s;
         }
         .tab:hover { background: rgba(255,255,255,0.15); color: #e2e8f0; }
-        .tab.active { background: #8b5cf6; color: white; }
+        .tab.active { background: linear-gradient(135deg,#ff2d95,#8b5cf6); color: white;
+                      box-shadow: 0 0 18px -3px rgba(255,45,149,.55); }
 
         /* Status view */
         .status-bar {
@@ -723,12 +770,13 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(275px,1fr)); gap:.85rem; }
         /* Desaturated full outline conveys state; no bright dots. Elevated
            surface so cards float above the cockpit background. */
-        .scard { background:linear-gradient(180deg, rgba(30,41,59,.72), rgba(17,24,39,.72));
-                 border:1.5px solid rgba(255,255,255,0.10);
+        .scard { background:linear-gradient(180deg, rgba(40,34,62,.86), rgba(19,15,32,.9));
+                 border:1.5px solid rgba(185,165,255,0.16);
                  border-radius:12px; padding:.85rem 1rem .9rem; position:relative; overflow:hidden;
                  min-height:250px; display:flex; flex-direction:column;
-                 box-shadow:0 6px 22px -10px rgba(0,0,0,.65), 0 0 0 1px rgba(0,0,0,.25);
-                 backdrop-filter:blur(3px);
+                 box-shadow:0 10px 34px -12px rgba(0,0,0,.85), 0 0 0 1px rgba(0,0,0,.35),
+                            0 0 26px -16px rgba(180,80,255,.55);
+                 backdrop-filter:blur(4px);
                  cursor:grab; transition:border-color .15s, box-shadow .15s, opacity .15s; }
         .scard:active { cursor:grabbing; }
         .scard.dragging { opacity:.4; }
@@ -761,18 +809,28 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         .scard:hover .editbtn, .scard.editing .editbtn { opacity:1; }
         .scard .editbtn:hover { color:#cbd5e1; background:rgba(255,255,255,0.06); }
         .scard.editing .editbtn { color:#7faa8f; opacity:1; }
+        /* Focus-window button (Mac-local sessions only), same treatment as ✎. */
+        .scard .focusbtn { background:none; border:none; color:#5b6773; cursor:pointer;
+                           font-size:.82rem; line-height:1; padding:.1rem .2rem; border-radius:4px;
+                           opacity:0; transition:opacity .12s, color .12s; }
+        .scard:hover .focusbtn, .scard.editing .focusbtn { opacity:1; }
+        .scard .focusbtn:hover { color:#7fd4e0; background:rgba(0,225,255,0.08); }
         .scard .pname { outline:none; border-radius:5px; padding:.05rem .25rem;
                         margin:-.05rem -.15rem; cursor:default; }
         .scard.editing .pname { cursor:text; background:rgba(255,255,255,0.09);
                                 box-shadow:0 0 0 1px rgba(148,163,184,.4); }
         .scard .idtag { font-size:.58rem; color:#5b6773; font-family:ui-monospace,Menlo,monospace;
                         margin-left:auto; }
+        /* Sublabel: plain text in normal mode (empty → hidden, no focus), an
+           editable field only inside edit mode. */
         .scard .title { font-size:.8rem; color:#e2e8f0; opacity:.9; margin-bottom:.3rem;
                         border-radius:5px; padding:.1rem .25rem; margin-left:-.25rem;
-                        outline:none; cursor:text; }
-        .scard .title:empty::before { content:'+ label'; color:#5b6773; font-style:italic; }
-        .scard .title:hover { background:rgba(255,255,255,0.05); }
-        .scard .title:focus { background:rgba(255,255,255,0.09);
+                        outline:none; cursor:default; }
+        .scard .title:empty { display:none; }
+        .scard.editing .title { display:block; cursor:text; }
+        .scard.editing .title:empty::before { content:'add note…'; color:#5b6773; font-style:italic; }
+        .scard.editing .title:hover { background:rgba(255,255,255,0.05); }
+        .scard.editing .title:focus { background:rgba(255,255,255,0.09);
                               box-shadow:0 0 0 1px rgba(148,163,184,.4); }
         .scard .lastprompt { font-size:.72rem; color:#93a3b5; line-height:1.4; margin-bottom:.4rem;
                              padding-left:.5rem; border-left:2px solid rgba(148,163,184,.28);
@@ -972,7 +1030,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                     directory: p.directory,
                     background: p.background,
                     foreground: p.foreground || '#ffffff',
-                    ssh: p.ssh || null
+                    ssh: p.ssh || null,
+                    title: p.name || null
                 })
             });
         }
@@ -1237,7 +1296,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             await fetch('/api/launch', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ directory: c.pwd || '~', background: '#16213e', foreground: '#ffffff' })
+                body: JSON.stringify({ directory: c.pwd || '~', background: '#16213e', foreground: '#ffffff', title: c.project || null })
             });
         }
 
@@ -1321,6 +1380,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
               const headStyle = `background:linear-gradient(100deg, ${hexA(color,.42)} 0%, ${hexA(color,.14)} 55%, ${hexA(color,.02)} 100%);`;
               const colorinp = `<label class="swatch editonly" title="recolor" onclick="event.stopPropagation()"><input type="color" class="swatchpick" data-cwd="${escapeHtml(cwd)}" value="${escapeHtml(color)}"></label>`;
               const editbtn = `<button class="editbtn" title="edit name & color" onclick="event.stopPropagation()">✎</button>`;
+              const canFocus = (s.machine==='mac') && (s.window_name||'').trim();
+              const focusbtn = canFocus
+                ? `<button class="focusbtn" title="focus Ghostty window" data-title="${escapeHtml(s.window_name)}" onclick="event.stopPropagation()">⤢</button>` : '';
               const subs = (s.subagents>0)
                 ? `<span class="subs">▷ ${s.subagents} sub${s.subagents>1?'s':''}</span>` : '';
               const ctx = s.context_tokens
@@ -1330,10 +1392,10 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
               const lastp = s.last_prompt
                 ? `<div class="lastprompt" title="your latest prompt">${escapeHtml(s.last_prompt)}</div>` : '';
               const activity = `<div class="activity">${escapeHtml(s.activity||'')}</div>`;
-              html += `<div class="scard s-${ui.c}" draggable="true" data-sid="${escapeHtml(s.session_id)}" style="border-left:4px solid ${escapeHtml(color)};">
-                <div class="proj" style="${headStyle}"><span class="pname" contenteditable="false" spellcheck="false" data-cwd="${escapeHtml(cwd)}">${escapeHtml(name)}</span>${colorinp}${editbtn}${idtag}</div>
+              html += `<div class="scard s-${ui.c}" draggable="true" data-sid="${escapeHtml(s.session_id)}">
+                <div class="proj" style="${headStyle}"><span class="pname" contenteditable="false" spellcheck="false" data-cwd="${escapeHtml(cwd)}">${escapeHtml(name)}</span>${colorinp}${editbtn}${focusbtn}${idtag}</div>
                 <div class="st">${marker}<span class="state">${ui.l}</span>${subs}${ctx}<span class="age">${agoSec(s.age)}</span></div>
-                <div class="title" contenteditable="true" spellcheck="false" data-sid="${escapeHtml(s.session_id)}">${escapeHtml(label)}</div>
+                <div class="title" contenteditable="false" spellcheck="false" data-sid="${escapeHtml(s.session_id)}">${escapeHtml(label)}</div>
                 ${lastp}
                 ${activity}
                 <div class="foot">
@@ -1358,9 +1420,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
         function enterEdit(card){
           const pname = card.querySelector('.pname');
+          const title = card.querySelector('.title');
           const btn = card.querySelector('.editbtn');
           cpBusy = true; card.draggable = false; card.classList.add('editing');
           if(btn) btn.textContent = '✓';
+          if(title) title.contentEditable = 'true';   // sublabel editable in edit mode
           if(pname){
             pname.contentEditable = 'true';
             pname.focus();
@@ -1370,10 +1434,15 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         }
         function exitEdit(card){
           const pname = card.querySelector('.pname');
+          const title = card.querySelector('.title');
           const btn = card.querySelector('.editbtn');
           if(pname){
             pname.contentEditable = 'false';
             saveUI({identity: true, cwd: pname.dataset.cwd, name: pname.textContent.trim()});
+          }
+          if(title){
+            title.contentEditable = 'false';
+            saveUI({session_id: title.dataset.sid, label: title.textContent.trim()});
           }
           if(btn) btn.textContent = '✎';
           card.classList.remove('editing'); card.draggable = true; cpBusy = false;
@@ -1387,26 +1456,39 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
         let dragEl = null;
         function wireCockpitCards(){
-          // Editable note labels — click, type, Enter/blur to save (per session).
+          // Sublabel note — editable only inside edit mode; Enter/Escape ends the
+          // edit (and saves), consistent with the name field.
           document.querySelectorAll('.scard .title').forEach(el=>{
-            const card = el.closest('.scard');
-            el.addEventListener('focus', ()=>{ cpBusy = true; card.draggable = false; });
-            el.addEventListener('blur', ()=>{
-              cpBusy = false; card.draggable = true;
-              saveUI({session_id: el.dataset.sid, label: el.textContent});
-            });
             el.addEventListener('keydown', e=>{
-              if(e.key==='Enter' || e.key==='Escape'){ e.preventDefault(); el.blur(); }
+              if(e.key==='Enter' || e.key==='Escape'){ e.preventDefault(); exitEdit(el.closest('.scard')); }
             });
           });
-          // ✎ toggles an edit panel: name becomes editable + colorpicker appears.
-          // Both are directory-keyed identity overrides. Edit mode is sticky
-          // (clicking the colorpicker won't dismiss it); ✎/Enter/Escape ends it.
+          // ✎ toggles an edit panel: name + sublabel become editable + colorpicker
+          // appears. Edit mode is sticky (clicking the colorpicker won't dismiss
+          // it); ✎ / Enter / Escape ends it.
           document.querySelectorAll('.scard .editbtn').forEach(btn=>{
             const card = btn.closest('.scard');
             btn.addEventListener('click', e=>{
               e.stopPropagation();
               card.classList.contains('editing') ? exitEdit(card) : enterEdit(card);
+            });
+          });
+          // Double-click the color header band to enter edit mode. Ignore the
+          // inner controls (swatch / ✎ / ⤢) so they keep their own behavior, and
+          // do nothing if already editing (lets you select header text then).
+          document.querySelectorAll('.scard .proj').forEach(proj=>{
+            proj.addEventListener('dblclick', e=>{
+              if(e.target.closest('.swatch') || e.target.closest('.editbtn') || e.target.closest('.focusbtn')) return;
+              const card = proj.closest('.scard');
+              if(card.classList.contains('editing')) return;
+              enterEdit(card);
+            });
+          });
+          // ⤢ focuses the matching Ghostty window (Mac-local sessions only).
+          document.querySelectorAll('.scard .focusbtn').forEach(btn=>{
+            btn.addEventListener('click', e=>{
+              e.stopPropagation();
+              fetch('/api/focus?title=' + encodeURIComponent(btn.dataset.title || '')).catch(()=>{});
             });
           });
           document.querySelectorAll('.scard .pname').forEach(el=>{
@@ -1416,9 +1498,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
           });
           document.querySelectorAll('.scard .swatchpick').forEach(inp=>{
             inp.addEventListener('input', ()=>{
-              const v = inp.value, proj = inp.closest('.proj'), card = inp.closest('.scard');
+              const v = inp.value, proj = inp.closest('.proj');
+              // Window color lives only in the header band now (no left spine).
               if(proj) proj.style.background = `linear-gradient(100deg, ${hexA(v,.42)} 0%, ${hexA(v,.14)} 55%, ${hexA(v,.02)} 100%)`;
-              if(card) card.style.borderLeft = '4px solid '+v;
             });
             inp.addEventListener('change', ()=>{ saveUI({identity: true, cwd: inp.dataset.cwd, color: inp.value}); });
           });
@@ -1482,6 +1564,10 @@ class Handler(BaseHTTPRequestHandler):
             self._send_response(json.dumps(load_status()), "application/json")
         elif self.path == "/api/live":
             self._send_response(json.dumps(cockpit_live()), "application/json")
+        elif self.path.startswith("/api/focus"):
+            q = parse_qs(urlparse(self.path).query)
+            self._send_response(json.dumps(focus_window(q.get("title", [""])[0])),
+                                "application/json")
         elif self.path.startswith("/api/history"):
             q = parse_qs(urlparse(self.path).query)
             self._send_response(json.dumps(load_history(q.get("project", [""])[0])),
@@ -1504,7 +1590,8 @@ class Handler(BaseHTTPRequestHandler):
                 data.get("directory", "~"),
                 data["background"],
                 data.get("foreground", "#ffffff"),
-                data.get("ssh")
+                data.get("ssh"),
+                data.get("title")
             )
             self._send_response(json.dumps({"ok": success}), "application/json")
 

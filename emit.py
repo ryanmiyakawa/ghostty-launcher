@@ -157,7 +157,9 @@ def main():
 
     # What Claude last said + context size/model — richest orientation signals.
     # Skip on the highest frequency event (PreToolUse) to keep tool calls snappy.
-    if event in ("PostToolUse", "Stop", "Notification", "SubagentStop"):
+    # SessionStart is included so the badge refreshes right after a /compact
+    # (Claude Code fires SessionStart with source:"compact" once compaction ends).
+    if event in ("SessionStart", "PostToolUse", "Stop", "Notification", "SubagentStop"):
         info = read_transcript(hook.get("transcript_path"))
         if info["activity"]:
             payload["activity"] = info["activity"]

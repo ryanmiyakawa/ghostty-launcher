@@ -26,6 +26,27 @@ Nothing binds a public port. The only cross-machine traffic is the SSH tunnels
 the dashboard owns (the Mac initiates them, so NAT is a non-issue). A dead tunnel
 just greys out that machine's card.
 
+### Click-to-focus Ghostty windows (Mac-local)
+
+Cards for Mac-local sessions show a **⤢** button (on hover) that raises the
+matching Ghostty window. The plumbing:
+
+- The **Launcher** stamps every window it opens with `--title=<project name>`
+  (Ghostty's `title` config key, which also locks the title against shell/OSC
+  overrides), so each window has a deterministic, matchable name.
+- **Hammerspoon** runs a tiny focus server on `127.0.0.1:8460`
+  (`GET /focus?title=<name>` → finds a Ghostty window whose title contains that
+  string and `:focus()`es it). Install `deploy/hammerspoon-cockpit.lua` — append
+  its `-- >>> agent-cockpit … -- <<< agent-cockpit` block to
+  `~/.hammerspoon/init.lua`, then reload Hammerspoon. It needs Hammerspoon's
+  **Accessibility** permission to raise windows.
+- The dashboard proxies `GET /api/focus?title=…` to that server (short timeout,
+  graceful failure), so the browser never talks to Hammerspoon directly.
+
+Only sessions on `machine == "mac"` with a resolved window name get the button;
+remote sessions don't. Windows launched *before* a session was titled won't have
+a stamped title and won't match — relaunch them from the Launcher.
+
 ### Setup
 
 - **This Mac:** `./install-mac.sh` (symlinks + collector launchd service), and make
