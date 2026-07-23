@@ -897,15 +897,16 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                         outline:none; cursor:default; }
         .scard .title:empty { display:none; }
         /* Explicit :empty variant so the hide rule can never out-cascade this;
-           min-height + faint field styling make the empty note a real, visible
-           click target in edit mode. */
+           an unmistakable dashed field so the note is obviously writable. */
         .scard.editing .title, .scard.editing .title:empty {
-            display:block; cursor:text; min-height:1.45em;
-            background:rgba(255,255,255,0.05); }
-        .scard.editing .title:empty::before { content:'add note…'; color:#5b6773; font-style:italic; }
-        .scard.editing .title:hover { background:rgba(255,255,255,0.07); }
-        .scard.editing .title:focus { background:rgba(255,255,255,0.09);
-                              box-shadow:0 0 0 1px rgba(148,163,184,.4); }
+            display:block; cursor:text; min-height:1.6em;
+            background:rgba(255,255,255,0.07);
+            box-shadow:0 0 0 1px rgba(148,163,184,.45);
+            border:1px dashed rgba(148,163,184,.35); }
+        .scard.editing .title:empty::before { content:'add note…'; color:#8b98a5; font-style:italic; }
+        .scard.editing .title:hover { background:rgba(255,255,255,0.10); }
+        .scard.editing .title:focus { background:rgba(255,255,255,0.10); border-style:solid;
+                              box-shadow:0 0 0 1px rgba(148,163,184,.6); }
         .scard .lastprompt { font-size:.72rem; color:#93a3b5; line-height:1.4; margin-bottom:.4rem;
                              padding-left:.5rem; border-left:2px solid rgba(148,163,184,.28);
                              display:-webkit-box; -webkit-line-clamp:4; -webkit-box-orient:vertical;
@@ -1466,6 +1467,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         let appliedBits = {};   // sid -> bits last written to the DOM
 
         function patchCard(card, b){
+          // A tick fetched before enterEdit can land mid-edit (cpBusy only
+          // gates the start of a tick) — never touch a card being edited.
+          if(card.classList.contains('editing')) return;
           const prev = appliedBits[b.sid] || {};
           if(prev.cls !== b.cls) card.className = b.cls;
           if(prev.ft !== b.ft) card.dataset.ft = b.ft;
@@ -1595,31 +1599,65 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
           document.title = (need ? `(${need}!) ` : '') + 'Ghostty Launcher';
         }
 
+        // Click-outside = accept: while a card is editing, a mousedown anywhere
+        // outside it commits the edit exactly like ✓. Registered on capture so
+        // it runs before other handlers; the trailing click is swallowed via
+        // justDragged so it can't double as a focus request on another card.
+        let editingCard = null;
+        function onDocMousedown(e){
+          const card = editingCard;
+          if(!card) return;
+          if(e.target && e.target.closest && e.target.closest('.scard') === card) return;
+          exitEdit(card);
+          justDragged = true; setTimeout(()=>{ justDragged = false; }, 250);
+        }
+
         function enterEdit(card){
           const pname = card.querySelector('.pname');
           const title = card.querySelector('.title');
           const btn = card.querySelector('.editbtn');
           cpBusy = true; card.draggable = false; card.classList.add('editing');
           if(btn) btn.textContent = '✓';
-          if(title) title.contentEditable = 'true';   // sublabel editable in edit mode
+          if(title){
+            title.contentEditable = 'true';   // sublabel editable in edit mode
+            // contenteditable often leaves a stray <br>/whitespace after the
+            // user deletes text — normalize so :empty (placeholder) works.
+            if(!title.textContent.trim()) title.innerHTML = '';
+            // Remember initial values so exit only saves actual changes —
+            // otherwise the fallback conversation title gets silently saved
+            // as a custom label just by opening and closing edit mode.
+            card.dataset.label0 = title.textContent.trim();
+          }
           if(pname){
             pname.contentEditable = 'true';
+            card.dataset.name0 = pname.textContent.trim();
             pname.focus();
             const r = document.createRange(); r.selectNodeContents(pname); r.collapse(false);
             const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r);
           }
+          editingCard = card;
+          // The mousedown that produced the ✎/dblclick already happened, so
+          // registering now can't self-trigger.
+          document.addEventListener('mousedown', onDocMousedown, true);
         }
         function exitEdit(card){
+          document.removeEventListener('mousedown', onDocMousedown, true);
+          editingCard = null;
           const pname = card.querySelector('.pname');
           const title = card.querySelector('.title');
           const btn = card.querySelector('.editbtn');
           if(pname){
             pname.contentEditable = 'false';
-            saveUI({identity: true, cwd: pname.dataset.cwd, name: pname.textContent.trim()});
+            const name = pname.textContent.trim();
+            if(name !== card.dataset.name0)
+              saveUI({identity: true, cwd: pname.dataset.cwd, name});
           }
           if(title){
             title.contentEditable = 'false';
-            saveUI({session_id: title.dataset.sid, label: title.textContent.trim()});
+            const label = title.textContent.trim();
+            if(!label) title.innerHTML = '';   // shed stray <br> so :empty hides it
+            if(label !== card.dataset.label0)
+              saveUI({session_id: title.dataset.sid, label});
           }
           if(btn) btn.textContent = '✎';
           card.classList.remove('editing'); card.draggable = true; cpBusy = false;
@@ -1680,6 +1718,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
           document.querySelectorAll('.scard .focusbtn').forEach(btn=>{
             btn.addEventListener('click', e=>{
               e.stopPropagation();
+              if(justDragged) return;  // swallowed click (drag / outside-commit)
               sendFocus(btn.closest('.scard'));
             });
           });
