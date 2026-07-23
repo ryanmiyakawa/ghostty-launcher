@@ -28,9 +28,45 @@ STATUS_JSON = os.path.join(STATUS_REPO, "status.json")
 # tunnel it maintains itself (hosts from agent-cockpit-hosts.json). See README.
 LOCAL_COLLECTOR = int(os.environ.get("AGENT_COLLECTOR_PORT", "8458"))
 HOSTS_PATH = os.path.expanduser("~/.claude/agent-cockpit-hosts.json")
+# User-editable per-session labels + manual card order, persisted on the Mac.
+COCKPIT_UI_PATH = os.path.expanduser("~/.claude/agent-cockpit-ui.json")
 
 _tunnel_state = {}          # name -> {"up": bool, "error": str, "since": float}
 _tstate_lock = threading.Lock()
+_ui_lock = threading.Lock()
+
+
+def load_cockpit_ui():
+    try:
+        with open(COCKPIT_UI_PATH) as f:
+            ui = json.load(f)
+    except (IOError, json.JSONDecodeError):
+        ui = {}
+    ui.setdefault("labels", {})   # session_id -> custom name
+    ui.setdefault("order", [])    # session_id[] manual ordering
+    return ui
+
+
+def update_cockpit_ui(patch):
+    """Merge a partial UI update (labels / order) and persist it."""
+    with _ui_lock:
+        ui = load_cockpit_ui()
+        if "label" in patch:
+            sid = patch.get("session_id", "")
+            text = (patch.get("label") or "").strip()[:80]
+            if sid:
+                if text:
+                    ui["labels"][sid] = text
+                else:
+                    ui["labels"].pop(sid, None)
+        if "order" in patch and isinstance(patch["order"], list):
+            ui["order"] = [s for s in patch["order"] if isinstance(s, str)]
+        try:
+            with open(COCKPIT_UI_PATH, "w") as f:
+                json.dump(ui, f, indent=2)
+        except IOError:
+            pass
+        return ui
 
 
 def cockpit_hosts():
@@ -150,7 +186,14 @@ def cockpit_live():
             "error": "" if data else (ts.get("error") or "tunnel down"),
             "sessions": data.get("sessions", []) if data else [],
         })
-    return machines
+
+    # Overlay user-set custom labels; hand the manual order to the client.
+    ui = load_cockpit_ui()
+    labels = ui.get("labels", {})
+    for m in machines:
+        for s in m.get("sessions", []):
+            s["custom_title"] = labels.get(s.get("session_id", ""), "")
+    return {"machines": machines, "order": ui.get("order", [])}
 
 
 def load_status():
@@ -600,56 +643,76 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         .cockpit-bar { display:flex; align-items:center; justify-content:flex-end;
                        gap:.75rem; margin-bottom:1rem; min-height:1.2rem; }
         .cockpit-bar .sub { font-size:.8rem; color:#94a3b8; }
+        .cockpit-bar .hint { margin-right:auto; font-size:.72rem; color:#64748b; }
         .machines { display:flex; flex-direction:column; gap:1.1rem; }
         .machine-head { display:flex; align-items:center; gap:.55rem; margin-bottom:.55rem;
                         font-size:.8rem; text-transform:uppercase; letter-spacing:.06em; color:#94a3b8; }
         .machine-head .mdot { width:.55rem; height:.55rem; border-radius:50%; }
         .machine-head .mlabel { font-family:ui-monospace,Menlo,monospace; text-transform:none;
                                 letter-spacing:0; opacity:.55; font-size:.72rem; }
-        .machine-head .merr { color:#f43f5e; text-transform:none; letter-spacing:0; font-size:.72rem; }
-        .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(250px,1fr)); gap:.75rem; }
-        .scard { background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.08);
-                 border-left-width:4px; border-radius:12px; padding:.85rem .95rem;
-                 position:relative; overflow:hidden; }
-        .scard .st { display:flex; align-items:center; gap:.5rem; margin-bottom:.4rem; }
-        .scard .glyph { font-size:.9rem; }
+        .machine-head .merr { color:#b5707c; text-transform:none; letter-spacing:0; font-size:.72rem; }
+        .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:.75rem; }
+        /* Desaturated full outline conveys state; no bright dots. */
+        .scard { background:rgba(255,255,255,0.035); border:1.5px solid rgba(255,255,255,0.10);
+                 border-radius:12px; padding:.9rem 1rem; position:relative;
+                 min-height:172px; display:flex; flex-direction:column;
+                 cursor:grab; transition:border-color .15s, box-shadow .15s, opacity .15s; }
+        .scard:active { cursor:grabbing; }
+        .scard.dragging { opacity:.4; }
+        .scard.dragover { box-shadow:0 0 0 2px rgba(148,163,184,.5); }
+        .scard .st { display:flex; align-items:center; gap:.5rem; margin-bottom:.45rem; }
+        .scard .sdot { width:.55rem; height:.55rem; border-radius:50%; flex:none; }
         .scard .state { font-size:.7rem; font-weight:700; text-transform:uppercase; letter-spacing:.05em; }
-        .scard .subs { font-size:.66rem; color:#cbd5e1; background:rgba(255,255,255,0.08);
+        .scard .subs { font-size:.64rem; color:#cbd5e1; background:rgba(255,255,255,0.08);
                        padding:.05rem .4rem; border-radius:999px; }
+        .scard .ctx { font-size:.64rem; color:#8b98a5; background:rgba(255,255,255,0.05);
+                      padding:.05rem .4rem; border-radius:999px; font-family:ui-monospace,Menlo,monospace; }
         .scard .age { margin-left:auto; font-size:.68rem; color:#64748b; }
-        .scard .proj { font-size:1.02rem; font-weight:650; margin-bottom:.2rem;
+        .scard .proj { font-size:1.0rem; font-weight:650; margin-bottom:.25rem;
                        display:flex; align-items:center; gap:.42rem; }
         .scard .swatch { width:.72rem; height:.72rem; border-radius:3px; flex:none;
                          box-shadow:0 0 0 1px rgba(255,255,255,0.18) inset; }
-        .scard .idtag { font-size:.6rem; color:#64748b; font-family:ui-monospace,Menlo,monospace;
+        .scard .idtag { font-size:.58rem; color:#5b6773; font-family:ui-monospace,Menlo,monospace;
                         margin-left:auto; }
-        .scard .title { font-size:.79rem; color:#e2e8f0; opacity:.82; margin-bottom:.25rem;
-                        overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-        .scard .activity { font-size:.75rem; color:#94a3b8; line-height:1.4; margin-bottom:.3rem;
-                           display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical;
-                           overflow:hidden; }
-        .scard .detail { font-size:.72rem; color:#64748b; overflow:hidden;
+        .scard .title { font-size:.8rem; color:#e2e8f0; opacity:.9; margin-bottom:.3rem;
+                        border-radius:5px; padding:.1rem .25rem; margin-left:-.25rem;
+                        outline:none; cursor:text; }
+        .scard .title:empty::before { content:'+ label'; color:#5b6773; font-style:italic; }
+        .scard .title:hover { background:rgba(255,255,255,0.05); }
+        .scard .title:focus { background:rgba(255,255,255,0.09);
+                              box-shadow:0 0 0 1px rgba(148,163,184,.4); }
+        .scard .activity { font-size:.75rem; color:#9aa7b4; line-height:1.42; margin-bottom:.4rem;
+                           display:-webkit-box; -webkit-line-clamp:4; -webkit-box-orient:vertical;
+                           overflow:hidden; flex:1; }
+        .scard .foot { margin-top:auto; }
+        .scard .detail { font-size:.7rem; color:#64748b; overflow:hidden;
                          text-overflow:ellipsis; white-space:nowrap; }
-        .scard .cwd { margin-top:.35rem; font-size:.65rem; color:#5b6773;
+        .scard .cwd { margin-top:.3rem; font-size:.64rem; color:#55606c;
                       font-family:ui-monospace,Menlo,monospace;
                       overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-        .scard.s-need { border-left-color:#f43f5e; box-shadow:0 0 0 1px rgba(244,63,94,0.22); }
-        .scard.s-need .state { color:#f43f5e; }
-        .scard.s-working { border-left-color:#22c55e; }
-        .scard.s-working .state { color:#22c55e; }
-        .scard.s-done { border-left-color:#38bdf8; }
-        .scard.s-done .state { color:#38bdf8; }
-        .scard.s-stale { border-left-color:#64748b; opacity:.55; }
-        .scard.s-stale .state { color:#64748b; }
-        .scard.s-starting { border-left-color:#a78bfa; }
-        .scard.s-starting .state { color:#a78bfa; }
-        .scard.s-need::after { content:""; position:absolute; inset:0; border-radius:12px;
-            pointer-events:none; animation:spulse 1.6s ease-in-out infinite; }
-        @keyframes spulse { 0%{box-shadow:0 0 0 0 rgba(244,63,94,0.45);}
-            70%{box-shadow:0 0 0 8px rgba(244,63,94,0);} 100%{box-shadow:0 0 0 0 rgba(244,63,94,0);} }
-        .work-pip { width:.5rem; height:.5rem; border-radius:50%; background:#22c55e;
-                    animation:sblink 1.1s ease-in-out infinite; }
-        @keyframes sblink { 0%,100%{opacity:1;} 50%{opacity:.25;} }
+        /* Desaturated state palette (border + label + dot). */
+        .scard.s-need    { border-color:rgba(176,110,124,.85); }
+        .scard.s-need    .state, .scard.s-need .sdot { color:#c08794; }
+        .scard.s-need    .sdot { background:#b06e7c; }
+        .scard.s-working { border-color:rgba(108,150,124,.85); }
+        .scard.s-working .state { color:#7faa8f; }
+        .scard.s-working .sdot { background:#6f9e80; }
+        .scard.s-done    { border-color:rgba(108,138,168,.85); }
+        .scard.s-done    .state { color:#87a2bd; }
+        .scard.s-done    .sdot { background:#7291ab; }
+        .scard.s-starting{ border-color:rgba(138,124,168,.85); }
+        .scard.s-starting .state { color:#a294c0; }
+        .scard.s-starting .sdot { background:#8a7ca8; }
+        .scard.s-stale   { border-color:rgba(90,100,114,.7); opacity:.55; }
+        .scard.s-stale   .state { color:#7a8492; }
+        .scard.s-stale   .sdot { background:#5a6472; }
+        /* Gentle, desaturated attention pulse for "needs you" only. */
+        .scard.s-need { animation:sglow 2.4s ease-in-out infinite; }
+        @keyframes sglow { 0%,100%{box-shadow:0 0 0 0 rgba(176,110,124,0);}
+            50%{box-shadow:0 0 0 3px rgba(176,110,124,.18);} }
+        .work-pip { width:.55rem; height:.55rem; border-radius:50%; background:#6f9e80;
+                    flex:none; animation:sblink 1.4s ease-in-out infinite; }
+        @keyframes sblink { 0%,100%{opacity:1;} 50%{opacity:.3;} }
         .machines .empty { color:#64748b; font-size:.85rem; padding:.3rem 0; }
         .machines .none { color:#64748b; text-align:center; padding:4rem 1rem; }
     </style>
@@ -667,6 +730,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
         <div id="view-cockpit">
             <div class="cockpit-bar">
+                <span class="hint">Click a label to rename · drag cards to reorder</span>
                 <span class="sub" id="cockpit-sub"></span>
             </div>
             <div class="machines" id="machines"><div class="none">Connecting…</div></div>
@@ -1088,31 +1152,51 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
         // ---- Cockpit (live agent status) ----
         const CUI = {
-          needs_input:{g:'🔴',l:'needs you',c:'need'},
-          working:{g:'🟢',l:'working',c:'working'},
-          done:{g:'🔵',l:'done',c:'done'},
-          starting:{g:'🟣',l:'starting',c:'starting'},
-          stale:{g:'⚪',l:'stale',c:'stale'},
-          idle:{g:'🔵',l:'done',c:'done'},
+          needs_input:{l:'needs you',c:'need'},
+          working:{l:'working',c:'working'},
+          done:{l:'done',c:'done'},
+          starting:{l:'starting',c:'starting'},
+          stale:{l:'stale',c:'stale'},
+          idle:{l:'done',c:'done'},
         };
         const CORDER = {needs_input:0, working:1, starting:2, done:3, idle:3, stale:4};
         let cockpitTimer = null;
+        let manualOrder = [];   // session_id[] — user's drag order
+        let cpBusy = false;     // editing a label or dragging → pause re-render
 
         function agoSec(a){ if(a==null) return ''; a=Math.max(0,a|0);
           if(a<60) return a+'s'; if(a<3600) return (a/60|0)+'m'; return (a/3600|0)+'h'; }
+        function fmtTok(n){ if(!n) return '';
+          return n>=1000 ? (n/1000).toFixed(n>=100000?0:1).replace(/\.0$/,'')+'k' : ''+n; }
+        function shortModel(m){ return (m||'').replace(/^claude-/,'').replace(/-\d{6,}$/,''); }
+        function orderIndex(sid){ const i = manualOrder.indexOf(sid); return i<0 ? 1e6 : i; }
+
+        async function saveUI(patch){
+          try {
+            const r = await fetch('/api/ui', {method:'POST',
+              headers:{'Content-Type':'application/json'}, body:JSON.stringify(patch)});
+            const ui = await r.json();
+            if(ui && ui.order) manualOrder = ui.order;
+          } catch(e){}
+        }
 
         async function cockpitTick(){
-          let machines = [];
-          try { machines = await (await fetch('/api/live')).json(); }
+          if(cpBusy) return;   // never clobber an in-progress edit / drag
+          let data;
+          try { data = await (await fetch('/api/live')).json(); }
           catch(e){ return; }
+          const machines = data.machines || [];
+          manualOrder = data.order || [];
           let need=0, work=0, total=0, html='';
           for(const m of machines){
-            const sess = (m.sessions||[]).slice()
-              .sort((a,b)=>(CORDER[a.state]??9)-(CORDER[b.state]??9));
+            const sess = (m.sessions||[]).slice().sort((a,b)=>{
+              const oa=orderIndex(a.session_id), ob=orderIndex(b.session_id);
+              return oa!==ob ? oa-ob : (CORDER[a.state]??9)-(CORDER[b.state]??9);
+            });
             total += sess.length;
             need += sess.filter(s=>s.state==='needs_input').length;
             work += sess.filter(s=>s.state==='working').length;
-            const mdot = m.reachable ? '#22c55e' : '#f43f5e';
+            const mdot = m.reachable ? '#6f9e80' : '#b06e7c';
             html += `<div><div class="machine-head">
                 <span class="mdot" style="background:${mdot}"></span>
                 <span>${escapeHtml(m.name)}</span>
@@ -1125,29 +1209,35 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             }
             html += '<div class="grid">';
             for(const s of sess){
-              const ui = CUI[s.state] || {g:'⚪', l:s.state, c:'stale'};
-              const pip = s.state==='working'
-                ? '<span class="work-pip"></span>' : `<span class="glyph">${ui.g}</span>`;
+              const ui = CUI[s.state] || {l:s.state, c:'stale'};
+              const marker = s.state==='working'
+                ? '<span class="work-pip"></span>' : '<span class="sdot"></span>';
               const name = s.window_name || s.project || '?';
               const swatch = s.window_color
                 ? `<span class="swatch" style="background:${escapeHtml(s.window_color)}"></span>` : '';
               const subs = (s.subagents>0)
                 ? `<span class="subs">▷ ${s.subagents} sub${s.subagents>1?'s':''}</span>` : '';
+              const ctx = s.context_tokens
+                ? `<span class="ctx" title="context tokens / model">${fmtTok(s.context_tokens)}${s.model?(' · '+escapeHtml(shortModel(s.model))):''}</span>` : '';
               const idtag = `<span class="idtag">${escapeHtml((s.session_id||'').slice(0,6))}</span>`;
-              const title = s.title ? `<div class="title">${escapeHtml(s.title)}</div>` : '';
-              const activity = s.activity ? `<div class="activity">${escapeHtml(s.activity)}</div>` : '';
-              html += `<div class="scard s-${ui.c}">
-                <div class="st">${pip}<span class="state">${ui.l}</span>${subs}<span class="age">${agoSec(s.age)}</span></div>
+              const label = s.custom_title || s.title || '';
+              const activity = `<div class="activity">${escapeHtml(s.activity||'')}</div>`;
+              html += `<div class="scard s-${ui.c}" draggable="true" data-sid="${escapeHtml(s.session_id)}">
+                <div class="st">${marker}<span class="state">${ui.l}</span>${subs}${ctx}<span class="age">${agoSec(s.age)}</span></div>
                 <div class="proj">${swatch}${escapeHtml(name)}${idtag}</div>
-                ${title}${activity}
-                <div class="detail">${escapeHtml(s.detail||'')||'&nbsp;'}</div>
-                <div class="cwd">${escapeHtml(s.cwd||'')}</div>
+                <div class="title" contenteditable="true" spellcheck="false" data-sid="${escapeHtml(s.session_id)}">${escapeHtml(label)}</div>
+                ${activity}
+                <div class="foot">
+                  <div class="detail">${escapeHtml(s.detail||'')||'&nbsp;'}</div>
+                  <div class="cwd">${escapeHtml(s.cwd||'')}</div>
+                </div>
               </div>`;
             }
             html += '</div></div>';
           }
           document.getElementById('machines').innerHTML = total ? html :
             '<div class="none">No sessions reporting yet.<br>Start a Claude session on any wired machine.</div>';
+          wireCockpitCards();
           const bits = [];
           if(need) bits.push(need+' need you');
           if(work) bits.push(work+' working');
@@ -1156,6 +1246,49 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             bits.join(' · ') + ' · ' + new Date().toLocaleTimeString();
           document.title = (need ? `(${need}!) ` : '') + 'Ghostty Launcher';
         }
+
+        function persistOrder(){
+          const sids = [...document.querySelectorAll('.scard')].map(c=>c.dataset.sid);
+          manualOrder = sids;
+          saveUI({order: sids});
+        }
+
+        let dragEl = null;
+        function wireCockpitCards(){
+          // Editable labels — click, type, Enter/blur to save.
+          document.querySelectorAll('.scard .title').forEach(el=>{
+            const card = el.closest('.scard');
+            el.addEventListener('focus', ()=>{ cpBusy = true; card.draggable = false; });
+            el.addEventListener('blur', ()=>{
+              cpBusy = false; card.draggable = true;
+              saveUI({session_id: el.dataset.sid, label: el.textContent});
+            });
+            el.addEventListener('keydown', e=>{
+              if(e.key==='Enter' || e.key==='Escape'){ e.preventDefault(); el.blur(); }
+            });
+          });
+          // Drag to reorder.
+          document.querySelectorAll('.scard').forEach(card=>{
+            card.addEventListener('dragstart', e=>{
+              dragEl = card; cpBusy = true; card.classList.add('dragging');
+              e.dataTransfer.effectAllowed = 'move';
+            });
+            card.addEventListener('dragend', ()=>{
+              card.classList.remove('dragging');
+              document.querySelectorAll('.scard.dragover').forEach(c=>c.classList.remove('dragover'));
+              dragEl = null; cpBusy = false; persistOrder();
+            });
+            card.addEventListener('dragover', e=>{
+              e.preventDefault();
+              if(!dragEl || dragEl===card) return;
+              const grid = card.parentElement;
+              const rect = card.getBoundingClientRect();
+              const after = (e.clientY - rect.top) / rect.height > 0.5;
+              grid.insertBefore(dragEl, after ? card.nextSibling : card);
+            });
+          });
+        }
+
         function startCockpit(){
           if(!cockpitTimer){ cockpitTick(); cockpitTimer = setInterval(cockpitTick, 1500); }
         }
@@ -1219,6 +1352,10 @@ class Handler(BaseHTTPRequestHandler):
                 data.get("ssh")
             )
             self._send_response(json.dumps({"ok": success}), "application/json")
+
+        elif self.path == "/api/ui":
+            ui = update_cockpit_ui(json.loads(body))
+            self._send_response(json.dumps(ui), "application/json")
 
         else:
             self._send_response("Not Found", status=404)

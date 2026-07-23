@@ -59,6 +59,9 @@ def ingest(payload):
             "title": prev.get("title") or payload.get("title", ""),
             # Latest "what Claude just said" snippet (changes as work progresses).
             "activity": payload.get("activity") or prev.get("activity", ""),
+            # Context size + model, derived from the transcript's usage block.
+            "context_tokens": payload.get("context_tokens", prev.get("context_tokens", 0)),
+            "model": payload.get("model") or prev.get("model", ""),
             # Live subagent count (best-effort).
             "subagents": payload.get("subagents", prev.get("subagents", 0)),
             # Explicit window identity, if the emitter had it.

@@ -75,20 +75,21 @@ def subagent_count(sid, delta=0, reset=False):
     return n
 
 
-def last_activity(path):
-    """Tail the transcript and return the last thing Claude actually said —
-    real orientation text, cheap (reads only the final chunk of the file)."""
+def read_transcript(path):
+    """Tail the transcript (cheap — only the final chunk) and pull orientation
+    signals: what Claude last said, the context size + model from the latest
+    `usage` block. The hook payload has none of this, but the transcript does."""
+    info = {"activity": "", "context_tokens": 0, "model": ""}
     if not path or not os.path.exists(path):
-        return ""
+        return info
     try:
         with open(path, "rb") as f:
             f.seek(0, os.SEEK_END)
             size = f.tell()
-            f.seek(max(0, size - 65536))
+            f.seek(max(0, size - 131072))
             tail = f.read().decode("utf-8", "replace")
     except Exception:
-        return ""
-    text = ""
+        return info
     for line in tail.splitlines():
         try:
             obj = json.loads(line)
@@ -96,10 +97,19 @@ def last_activity(path):
             continue
         if obj.get("type") != "assistant":
             continue
-        for block in obj.get("message", {}).get("content", []):
+        msg = obj.get("message", {})
+        for block in msg.get("content", []):
             if isinstance(block, dict) and block.get("type") == "text" and block.get("text"):
-                text = block["text"]
-    return " ".join(text.split())[:160]
+                info["activity"] = block["text"]
+        u = msg.get("usage")
+        if u:
+            info["context_tokens"] = (u.get("input_tokens", 0)
+                                      + u.get("cache_creation_input_tokens", 0)
+                                      + u.get("cache_read_input_tokens", 0))
+        if msg.get("model"):
+            info["model"] = msg["model"]
+    info["activity"] = " ".join(info["activity"].split())[:200]
+    return info
 
 
 def main():
@@ -143,12 +153,16 @@ def main():
     elif event == "UserPromptSubmit":
         payload["title"] = " ".join((hook.get("prompt") or "").split())[:90]
 
-    # What Claude last said — richest orientation signal. Skip on the highest
-    # frequency event (PreToolUse) to keep tool calls snappy.
+    # What Claude last said + context size/model — richest orientation signals.
+    # Skip on the highest frequency event (PreToolUse) to keep tool calls snappy.
     if event in ("PostToolUse", "Stop", "Notification", "SubagentStop"):
-        act = last_activity(hook.get("transcript_path"))
-        if act:
-            payload["activity"] = act
+        info = read_transcript(hook.get("transcript_path"))
+        if info["activity"]:
+            payload["activity"] = info["activity"]
+        if info["context_tokens"]:
+            payload["context_tokens"] = info["context_tokens"]
+        if info["model"]:
+            payload["model"] = info["model"]
 
     if os.environ.get("AGENT_WINDOW_NAME"):
         payload["window_name"] = os.environ["AGENT_WINDOW_NAME"]
