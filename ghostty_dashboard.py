@@ -203,14 +203,18 @@ def enrich(sess, overrides):
     config, unless it already carried explicit identity from its shell; then
     apply any user override on top."""
     cwd = (sess.get("cwd") or "").rstrip("/")
-    if not sess.get("window_name") or not sess.get("window_color"):
-        for norm, name, color in _launcher_dirs():
-            if norm and (cwd == norm or cwd.startswith(norm + "/")):
-                if not sess.get("window_name"):
-                    sess["window_name"] = name
-                if not sess.get("window_color"):
-                    sess["window_color"] = color
-                break
+    for norm, name, color in _launcher_dirs():
+        if norm and (cwd == norm or cwd.startswith(norm + "/")):
+            # The launcher-config name is what launched windows are stamped
+            # with (--title=<name>) — keep it separately for click-to-focus,
+            # because the display name may be a user identity override.
+            if name:
+                sess["launch_title"] = name
+            if not sess.get("window_name"):
+                sess["window_name"] = name
+            if not sess.get("window_color"):
+                sess["window_color"] = color
+            break
     return apply_identity(sess, overrides)
 
 
@@ -345,13 +349,14 @@ def launch_ghostty(directory, background, foreground="#ffffff", ssh=None, title=
 HS_FOCUS_PORT = int(os.environ.get("AGENT_HS_FOCUS_PORT", "8460"))
 
 
-def focus_window(title):
-    """Ask Hammerspoon to focus the Ghostty window whose title matches. Always
-    returns JSON; a missing/broken Hammerspoon just yields {ok: false}."""
-    if not title:
+def focus_window(title, alt=""):
+    """Ask Hammerspoon to focus the Ghostty window whose title matches; `alt`
+    is a fallback needle (cwd basename) for windows launched before titles were
+    stamped. Always returns JSON; a missing/broken Hammerspoon → {ok: false}."""
+    if not title and not alt:
         return {"ok": False, "error": "no title"}
     try:
-        url = f"http://127.0.0.1:{HS_FOCUS_PORT}/focus?title={quote(title)}"
+        url = f"http://127.0.0.1:{HS_FOCUS_PORT}/focus?title={quote(title or '')}&alt={quote(alt or '')}"
         with urllib.request.urlopen(url, timeout=1.0) as r:
             return json.loads(r.read().decode())
     except Exception as e:
@@ -403,7 +408,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 rgba(255,255,255,.014) 0 1px, transparent 1px 3px);
         }
 
-        .container { max-width: 1200px; margin: 0 auto; position: relative; }
+        /* Full-bleed: span the viewport (body's 2rem padding is the margin) so
+           wide windows fit more cards per row; the auto-fill grid wraps rows. */
+        .container { width: 100%; margin: 0 auto; position: relative; }
 
         /* No title text — just the tab strip, right-aligned, above the views. */
         header {
@@ -757,13 +764,17 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         .machine-head .mlabel { font-family:ui-monospace,Menlo,monospace; text-transform:none;
                                 letter-spacing:0; opacity:.55; font-size:.72rem; }
         .machine-head .merr { color:#b5707c; text-transform:none; letter-spacing:0; font-size:.72rem; }
-        .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(275px,1fr)); gap:.85rem; }
+        /* auto-fit (not -fill) collapses empty trailing tracks, and the bounded
+           track max keeps cards sane on huge windows — so leftover width splits
+           evenly left/right via justify-content:center instead of piling right. */
+        .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(275px,420px));
+                gap:.85rem; justify-content:center; }
         /* Desaturated full outline conveys state; no bright dots. Elevated
            surface so cards float above the cockpit background. */
         .scard { background:linear-gradient(180deg, rgba(40,34,62,.86), rgba(19,15,32,.9));
                  border:1.5px solid rgba(185,165,255,0.16);
                  border-radius:12px; padding:.85rem 1rem .9rem; position:relative; overflow:hidden;
-                 min-height:250px; display:flex; flex-direction:column;
+                 min-height:325px; display:flex; flex-direction:column;
                  box-shadow:0 10px 34px -12px rgba(0,0,0,.85), 0 0 0 1px rgba(0,0,0,.35),
                             0 0 26px -16px rgba(180,80,255,.55);
                  backdrop-filter:blur(4px);
@@ -796,10 +807,14 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         .scard .age { margin-left:auto; font-size:.68rem; color:#64748b; }
         /* The whole name row is the color band — the window color tints the
            header full-bleed, so each card wears its Ghostty identity. */
+        /* No text selection in the header: dbl-click means "edit", and the
+           inner controls shouldn't fight the I-beam cursor. */
         .scard .proj { font-size:1.02rem; font-weight:650;
                        display:flex; align-items:center; gap:.42rem;
                        margin:-.85rem -1rem .5rem; padding:.5rem 1rem .45rem;
-                       border-bottom:1px solid rgba(255,255,255,0.07); }
+                       border-bottom:1px solid rgba(255,255,255,0.07);
+                       user-select:none; -webkit-user-select:none; }
+        .scard.editing .proj { user-select:text; -webkit-user-select:text; }
         .scard .swatch { position:relative; width:.95rem; height:.95rem; border-radius:3px;
                          flex:none; box-shadow:0 0 0 1px rgba(255,255,255,0.35) inset;
                          cursor:pointer; overflow:hidden;
@@ -809,6 +824,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         .scard .editonly { display:none; }
         .scard.editing .editonly { display:inline-block; }
         .scard .editbtn { background:none; border:none; color:#5b6773; cursor:pointer;
+                          user-select:none; -webkit-user-select:none;
                           font-size:.78rem; line-height:1; padding:.1rem .2rem; border-radius:4px;
                           opacity:0; transition:opacity .12s, color .12s; }
         .scard:hover .editbtn, .scard.editing .editbtn { opacity:1; }
@@ -816,6 +832,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         .scard.editing .editbtn { color:#7faa8f; opacity:1; }
         /* Focus-window button (Mac-local sessions only), same treatment as ✎. */
         .scard .focusbtn { background:none; border:none; color:#5b6773; cursor:pointer;
+                           user-select:none; -webkit-user-select:none;
                            font-size:.82rem; line-height:1; padding:.1rem .2rem; border-radius:4px;
                            opacity:0; transition:opacity .12s, color .12s; }
         .scard:hover .focusbtn, .scard.editing .focusbtn { opacity:1; }
@@ -832,18 +849,23 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                         border-radius:5px; padding:.1rem .25rem; margin-left:-.25rem;
                         outline:none; cursor:default; }
         .scard .title:empty { display:none; }
-        .scard.editing .title { display:block; cursor:text; }
+        /* Explicit :empty variant so the hide rule can never out-cascade this;
+           min-height + faint field styling make the empty note a real, visible
+           click target in edit mode. */
+        .scard.editing .title, .scard.editing .title:empty {
+            display:block; cursor:text; min-height:1.45em;
+            background:rgba(255,255,255,0.05); }
         .scard.editing .title:empty::before { content:'add note…'; color:#5b6773; font-style:italic; }
-        .scard.editing .title:hover { background:rgba(255,255,255,0.05); }
+        .scard.editing .title:hover { background:rgba(255,255,255,0.07); }
         .scard.editing .title:focus { background:rgba(255,255,255,0.09);
                               box-shadow:0 0 0 1px rgba(148,163,184,.4); }
         .scard .lastprompt { font-size:.72rem; color:#93a3b5; line-height:1.4; margin-bottom:.4rem;
                              padding-left:.5rem; border-left:2px solid rgba(148,163,184,.28);
-                             display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical;
+                             display:-webkit-box; -webkit-line-clamp:4; -webkit-box-orient:vertical;
                              overflow:hidden; }
         .scard .lastprompt::before { content:'you: '; color:#5b6773; }
         .scard .activity { font-size:.75rem; color:#9aa7b4; line-height:1.42; margin-bottom:.4rem;
-                           display:-webkit-box; -webkit-line-clamp:7; -webkit-box-orient:vertical;
+                           display:-webkit-box; -webkit-line-clamp:10; -webkit-box-orient:vertical;
                            overflow:hidden; flex:1; }
         .scard .foot { margin-top:auto; }
         .scard .detail { font-size:.7rem; color:#64748b; overflow:hidden;
@@ -1387,9 +1409,14 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
               const headStyle = `background:linear-gradient(100deg, ${hexA(color,.42)} 0%, ${hexA(color,.14)} 55%, ${hexA(color,.02)} 100%);`;
               const colorinp = `<label class="swatch editonly" title="recolor" onclick="event.stopPropagation()"><input type="color" class="swatchpick" data-cwd="${escapeHtml(cwd)}" value="${escapeHtml(color)}"></label>`;
               const editbtn = `<button class="editbtn" title="edit name & color" onclick="event.stopPropagation()">✎</button>`;
-              const canFocus = (s.machine==='mac') && (s.window_name||'').trim();
+              // Prefer the launcher-config name (what --title stamps on the
+              // window) over the display name, which may be a user override;
+              // cwd basename rides along as a fallback for unstamped windows.
+              const focusTitle = (s.launch_title || s.window_name || '').trim();
+              const cwdBase = (cwd.replace(/\/+$/,'').split('/').pop() || '').trim();
+              const canFocus = (s.machine==='mac') && (focusTitle || cwdBase);
               const focusbtn = canFocus
-                ? `<button class="focusbtn" title="focus Ghostty window" data-title="${escapeHtml(s.window_name)}" onclick="event.stopPropagation()">⤢</button>` : '';
+                ? `<button class="focusbtn" title="focus Ghostty window" data-title="${escapeHtml(focusTitle)}" data-alt="${escapeHtml(cwdBase)}" onclick="event.stopPropagation()">⤢</button>` : '';
               const subs = (s.subagents>0)
                 ? `<span class="subs">▷ ${s.subagents} sub${s.subagents>1?'s':''}</span>` : '';
               const PMODES = {plan:{t:'plan',c:'pm-plan'},
@@ -1504,7 +1531,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
           document.querySelectorAll('.scard .focusbtn').forEach(btn=>{
             btn.addEventListener('click', e=>{
               e.stopPropagation();
-              fetch('/api/focus?title=' + encodeURIComponent(btn.dataset.title || '')).catch(()=>{});
+              fetch('/api/focus?title=' + encodeURIComponent(btn.dataset.title || '')
+                    + '&alt=' + encodeURIComponent(btn.dataset.alt || '')).catch(()=>{});
             });
           });
           document.querySelectorAll('.scard .pname').forEach(el=>{
@@ -1582,7 +1610,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send_response(json.dumps(cockpit_live()), "application/json")
         elif self.path.startswith("/api/focus"):
             q = parse_qs(urlparse(self.path).query)
-            self._send_response(json.dumps(focus_window(q.get("title", [""])[0])),
+            self._send_response(json.dumps(focus_window(q.get("title", [""])[0],
+                                                        q.get("alt", [""])[0])),
                                 "application/json")
         elif self.path.startswith("/api/history"):
             q = parse_qs(urlparse(self.path).query)
