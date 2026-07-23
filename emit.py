@@ -115,7 +115,7 @@ def read_transcript(path):
     """Tail the transcript (cheap — only the final chunk) and pull orientation
     signals: what Claude last said, the context size + model from the latest
     `usage` block. The hook payload has none of this, but the transcript does."""
-    info = {"activity": "", "context_tokens": 0, "model": ""}
+    info = {"activity": "", "context_tokens": 0, "model": "", "title_hint": ""}
     if not path or not os.path.exists(path):
         return info
     try:
@@ -130,6 +130,13 @@ def read_transcript(path):
         try:
             obj = json.loads(line)
         except Exception:
+            continue
+        # Claude Code's AI task summary — the exact text it retitles the
+        # terminal window with (minus the spinner glyph). Latest one wins;
+        # it's our best focus-match needle for windows without stamped titles.
+        if obj.get("type") == "ai-title":
+            if obj.get("aiTitle"):
+                info["title_hint"] = " ".join(str(obj["aiTitle"]).split())[:120]
             continue
         if obj.get("type") != "assistant":
             continue
@@ -208,6 +215,8 @@ def main():
             payload["context_tokens"] = info["context_tokens"]
         if info["model"]:
             payload["model"] = info["model"]
+        if info["title_hint"]:
+            payload["title_hint"] = info["title_hint"]
 
     # Permission mode (default / plan / acceptEdits / bypassPermissions) —
     # present on most hook events; the cockpit badges non-default modes.

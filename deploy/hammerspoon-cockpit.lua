@@ -65,16 +65,25 @@ cockpitFocusServer:setCallback(function(method, path, headers, body)
     if method ~= "GET" or not path:match("^/focus") then
         return reply(false)
     end
-    -- Pull ?title=...&alt=... out of the query string and URL-decode them.
+    -- Pull the candidate needles out of the query string, URL-decoded, and
+    -- try them in priority order: title (launcher-stamped --title), alt
+    -- (cwd basename), hint (Claude Code's AI task summary — its live
+    -- window-retitle text, for windows not launched from the Launcher).
     local query = path:match("%?(.*)$") or ""
-    local title, alt = nil, nil
+    local params = {}
     for k, v in query:gmatch("([^&=?]+)=([^&]*)") do
-        if k == "title" then title = cockpitUrlDecode(v) end
-        if k == "alt" then alt = cockpitUrlDecode(v) end
+        params[k] = cockpitUrlDecode(v)
     end
-    local ok = cockpitFocusGhostty(title)
-    if not ok and alt and alt ~= title then
-        ok = cockpitFocusGhostty(alt)
+    local tried, ok = {}, false
+    for _, key in ipairs({ "title", "alt", "hint" }) do
+        local needle = params[key]
+        if needle and needle ~= "" and not tried[needle] then
+            tried[needle] = true
+            if cockpitFocusGhostty(needle) then
+                ok = true
+                break
+            end
+        end
     end
     return reply(ok)
 end)

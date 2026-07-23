@@ -28,29 +28,35 @@ just greys out that machine's card.
 
 ### Click-to-focus Ghostty windows (Mac-local)
 
-Cards for Mac-local sessions show a **⤢** button (on hover) that raises the
-matching Ghostty window. The plumbing:
+Clicking a Mac-local session card — or its hover **⤢** button — raises the
+matching Ghostty window. Plain clicks on the card background only: clicks on
+inner controls, clicks while the card is in edit mode, and the click that
+trails a drag-reorder never trigger it. The plumbing:
 
 - The **Launcher** stamps every window it opens with `--title=<project name>`
   (Ghostty's `title` config key, which also locks the title against shell/OSC
   overrides), so each window has a deterministic, matchable name.
 - **Hammerspoon** runs a tiny focus server on `127.0.0.1:8460`
-  (`GET /focus?title=<name>&alt=<fallback>` → finds a Ghostty window whose title
-  contains the needle — falling back to `alt`, the session's cwd basename — and
-  `:focus()`es it). Ghostty runs **one process per window**, so the matcher
-  iterates every instance from `applicationsForBundleID("com.mitchellh.ghostty")`.
+  (`GET /focus?title=…&alt=…&hint=…` → tries each needle in order against every
+  Ghostty window title, case-insensitive contains, and `:focus()`es the first
+  match). The needles: the launcher-stamped title, the session's cwd basename,
+  and the session's **AI task summary** (the `ai-title` record Claude Code
+  writes to its transcript — the same text it retitles unlocked windows with,
+  so windows *not* launched from the Launcher usually still match). Ghostty
+  runs **one process per window**, so the matcher iterates every instance from
+  `applicationsForBundleID("com.mitchellh.ghostty")`.
   Install `deploy/hammerspoon-cockpit.lua` — append its
   `-- >>> agent-cockpit … -- <<< agent-cockpit` block to
   `~/.hammerspoon/init.lua`, then reload Hammerspoon. It needs Hammerspoon's
   **Accessibility** permission to raise windows.
-- The dashboard proxies `GET /api/focus?title=…&alt=…` to that server (short
-  timeout, graceful failure), so the browser never talks to Hammerspoon directly.
+- The dashboard proxies `GET /api/focus?title=…&alt=…&hint=…` to that server
+  (short timeout, graceful failure), so the browser never talks to Hammerspoon
+  directly.
 
-Only sessions on `machine == "mac"` with a resolved window name get the button;
-remote sessions don't. **Reliable matching requires launching from the Launcher**,
-which stamps a locked `--title`: Claude Code dynamically retitles unlocked
-windows with its live status summary, so windows opened by other means usually
-contain neither the project name nor the cwd basename and won't match.
+Only sessions on `machine == "mac"` with any match candidate are clickable;
+remote cards do nothing. Launcher-launched windows (stamped, locked `--title`)
+match deterministically; the AI-summary hint is best-effort — it tracks Claude
+Code's live retitles, lagging at most one hook event behind.
 
 ### Setup
 

@@ -92,6 +92,9 @@ def ingest(payload):
             # Context size + model, derived from the transcript's usage block.
             "context_tokens": payload.get("context_tokens", prev.get("context_tokens", 0)),
             "model": payload.get("model") or prev.get("model", ""),
+            # Claude Code's AI task summary (= its live window-retitle text) —
+            # used as a focus-match candidate for unstamped windows.
+            "title_hint": payload.get("title_hint") or prev.get("title_hint", ""),
             # Live subagent count (best-effort).
             "subagents": payload.get("subagents", prev.get("subagents", 0)),
             # Permission mode (plan / acceptEdits / bypassPermissions / default),

@@ -349,14 +349,17 @@ def launch_ghostty(directory, background, foreground="#ffffff", ssh=None, title=
 HS_FOCUS_PORT = int(os.environ.get("AGENT_HS_FOCUS_PORT", "8460"))
 
 
-def focus_window(title, alt=""):
-    """Ask Hammerspoon to focus the Ghostty window whose title matches; `alt`
-    is a fallback needle (cwd basename) for windows launched before titles were
-    stamped. Always returns JSON; a missing/broken Hammerspoon → {ok: false}."""
-    if not title and not alt:
+def focus_window(title, alt="", hint=""):
+    """Ask Hammerspoon to focus the Ghostty window matching one of the needles,
+    tried in order: `title` (launcher-stamped --title), `alt` (cwd basename),
+    `hint` (Claude Code's AI task summary — its live window-retitle text, for
+    windows not launched from the Launcher). Always returns JSON; a
+    missing/broken Hammerspoon → {ok: false}."""
+    if not (title or alt or hint):
         return {"ok": False, "error": "no title"}
     try:
-        url = f"http://127.0.0.1:{HS_FOCUS_PORT}/focus?title={quote(title or '')}&alt={quote(alt or '')}"
+        url = (f"http://127.0.0.1:{HS_FOCUS_PORT}/focus"
+               f"?title={quote(title or '')}&alt={quote(alt or '')}&hint={quote(hint or '')}")
         with urllib.request.urlopen(url, timeout=1.0) as r:
             return json.loads(r.read().decode())
     except Exception as e:
@@ -780,6 +783,10 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                  backdrop-filter:blur(4px);
                  cursor:grab; transition:border-color .15s, box-shadow .15s, opacity .15s; }
         .scard:active { cursor:grabbing; }
+        /* Focusable (mac-local) cards read as clickable; remote cards keep the
+           plain grab/drag affordance. */
+        .scard.focusable { cursor:pointer; }
+        .scard.focusable:active { cursor:grabbing; }
         .scard.dragging { opacity:.4; }
         .scard.dragover { box-shadow:0 0 0 2px rgba(148,163,184,.5); }
         .scard .st { display:flex; align-items:center; gap:.5rem; margin-bottom:.45rem; }
@@ -1409,14 +1416,21 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
               const headStyle = `background:linear-gradient(100deg, ${hexA(color,.42)} 0%, ${hexA(color,.14)} 55%, ${hexA(color,.02)} 100%);`;
               const colorinp = `<label class="swatch editonly" title="recolor" onclick="event.stopPropagation()"><input type="color" class="swatchpick" data-cwd="${escapeHtml(cwd)}" value="${escapeHtml(color)}"></label>`;
               const editbtn = `<button class="editbtn" title="edit name & color" onclick="event.stopPropagation()">✎</button>`;
-              // Prefer the launcher-config name (what --title stamps on the
-              // window) over the display name, which may be a user override;
-              // cwd basename rides along as a fallback for unstamped windows.
+              // Focus-match candidates, tried in order by Hammerspoon:
+              // 1. launcher-config name (what --title stamps on the window —
+              //    the display name may be a user override, so don't use that),
+              // 2. cwd basename, 3. Claude Code's AI task summary (its live
+              //    window-retitle text — catches windows not launched from the
+              //    Launcher). Stored on the card so both the ⤢ button and a
+              //    plain card click share them.
               const focusTitle = (s.launch_title || s.window_name || '').trim();
               const cwdBase = (cwd.replace(/\/+$/,'').split('/').pop() || '').trim();
-              const canFocus = (s.machine==='mac') && (focusTitle || cwdBase);
+              const focusHint = (s.title_hint || '').trim();
+              const canFocus = (s.machine==='mac') && (focusTitle || cwdBase || focusHint);
+              const focusData = canFocus
+                ? ` data-ft="${escapeHtml(focusTitle)}" data-fa="${escapeHtml(cwdBase)}" data-fh="${escapeHtml(focusHint)}"` : '';
               const focusbtn = canFocus
-                ? `<button class="focusbtn" title="focus Ghostty window" data-title="${escapeHtml(focusTitle)}" data-alt="${escapeHtml(cwdBase)}" onclick="event.stopPropagation()">⤢</button>` : '';
+                ? `<button class="focusbtn" title="focus Ghostty window" onclick="event.stopPropagation()">⤢</button>` : '';
               const subs = (s.subagents>0)
                 ? `<span class="subs">▷ ${s.subagents} sub${s.subagents>1?'s':''}</span>` : '';
               const PMODES = {plan:{t:'plan',c:'pm-plan'},
@@ -1435,7 +1449,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
               const lastp = s.last_prompt
                 ? `<div class="lastprompt" title="your latest prompt">${escapeHtml(s.last_prompt)}</div>` : '';
               const activity = `<div class="activity">${escapeHtml(s.activity||'')}</div>`;
-              html += `<div class="scard s-${ui.c}" draggable="true" data-sid="${escapeHtml(s.session_id)}">
+              html += `<div class="scard s-${ui.c}${canFocus?' focusable':''}" draggable="true" data-sid="${escapeHtml(s.session_id)}"${focusData}>
                 <div class="proj" style="${headStyle}"><span class="pname" contenteditable="false" spellcheck="false" data-cwd="${escapeHtml(cwd)}">${escapeHtml(name)}</span>${colorinp}${editbtn}${focusbtn}${idtag}</div>
                 <div class="st">${marker}<span class="state">${ui.l}</span>${pmode}${subs}${ctx}<span class="age">${agoSec(s.age)}</span></div>
                 <div class="title" contenteditable="false" spellcheck="false" data-sid="${escapeHtml(s.session_id)}">${escapeHtml(label)}</div>
@@ -1498,6 +1512,16 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         }
 
         let dragEl = null;
+        let justDragged = false;  // suppress the click that trails a drag-reorder
+
+        // Raise the Ghostty window for a card, using its candidate needles
+        // (stamped title, cwd basename, AI task summary) in order.
+        function sendFocus(card){
+          if(!card || !card.classList.contains('focusable')) return;
+          fetch('/api/focus?title=' + encodeURIComponent(card.dataset.ft || '')
+                + '&alt=' + encodeURIComponent(card.dataset.fa || '')
+                + '&hint=' + encodeURIComponent(card.dataset.fh || '')).catch(()=>{});
+        }
         function wireCockpitCards(){
           // Sublabel note — editable only inside edit mode; Enter/Escape ends the
           // edit (and saves), consistent with the name field.
@@ -1531,8 +1555,21 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
           document.querySelectorAll('.scard .focusbtn').forEach(btn=>{
             btn.addEventListener('click', e=>{
               e.stopPropagation();
-              fetch('/api/focus?title=' + encodeURIComponent(btn.dataset.title || '')
-                    + '&alt=' + encodeURIComponent(btn.dataset.alt || '')).catch(()=>{});
+              sendFocus(btn.closest('.scard'));
+            });
+          });
+          // Plain click anywhere on a focusable card's background also raises
+          // its window. Guards: not in edit mode, not on interactive bits
+          // (buttons / swatch / name / note), not the click that trails a
+          // drag-reorder, and not a click where the mouse actually moved.
+          document.querySelectorAll('.scard.focusable').forEach(card=>{
+            card.addEventListener('mousedown', e=>{ card._mx = e.clientX; card._my = e.clientY; });
+            card.addEventListener('click', e=>{
+              if(justDragged || card.classList.contains('editing')) return;
+              if(e.target.closest('.editbtn, .focusbtn, .swatch, .pname, .title, button, input, label')) return;
+              if(card._mx != null &&
+                 (Math.abs(e.clientX - card._mx) > 5 || Math.abs(e.clientY - card._my) > 5)) return;
+              sendFocus(card);
             });
           });
           document.querySelectorAll('.scard .pname').forEach(el=>{
@@ -1558,6 +1595,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
               card.classList.remove('dragging');
               document.querySelectorAll('.scard.dragover').forEach(c=>c.classList.remove('dragover'));
               dragEl = null; cpBusy = false; persistOrder();
+              // Swallow the click some browsers fire right after a drag so a
+              // reorder never doubles as a focus request.
+              justDragged = true; setTimeout(()=>{ justDragged = false; }, 250);
             });
             card.addEventListener('dragover', e=>{
               e.preventDefault();
@@ -1611,7 +1651,8 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path.startswith("/api/focus"):
             q = parse_qs(urlparse(self.path).query)
             self._send_response(json.dumps(focus_window(q.get("title", [""])[0],
-                                                        q.get("alt", [""])[0])),
+                                                        q.get("alt", [""])[0],
+                                                        q.get("hint", [""])[0])),
                                 "application/json")
         elif self.path.startswith("/api/history"):
             q = parse_qs(urlparse(self.path).query)
