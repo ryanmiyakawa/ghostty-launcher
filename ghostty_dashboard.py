@@ -385,6 +385,30 @@ def transcript_hint(cwd, sid):
         return ""
 
 
+def dismiss_session(sid):
+    """Drop a session from the collector rosters so its card disappears. Uses
+    the collectors' existing state:"ended" ingest path; broadcast to the local
+    collector and every tunnel port — popping an unknown sid is a no-op and
+    session ids are unique, so this is safe. If the session is actually alive,
+    its next hook event re-ingests it and the card respawns (by design)."""
+    if not sid:
+        return {"ok": False, "error": "no sid"}
+    ports = [LOCAL_COLLECTOR] + [int(h["local_port"]) for h in cockpit_hosts()
+                                 if h.get("local_port")]
+    ok = False
+    for port in ports:
+        try:
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/ingest",
+                data=json.dumps({"session_id": sid, "state": "ended"}).encode(),
+                headers={"Content-Type": "application/json"}, method="POST")
+            urllib.request.urlopen(req, timeout=1.0).read()
+            ok = True
+        except Exception:
+            pass
+    return {"ok": ok}
+
+
 def focus_window(title, alt="", hint="", sid="", cwd=""):
     """Ask Hammerspoon to focus the Ghostty window matching one of the needles,
     tried in order: `title` (launcher-stamped --title), `alt` (cwd basename),
@@ -884,6 +908,14 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                            opacity:0; transition:opacity .12s, color .12s; }
         .scard:hover .focusbtn, .scard.editing .focusbtn { opacity:1; }
         .scard .focusbtn:hover { color:#7fd4e0; background:rgba(0,225,255,0.08); }
+        /* Dismiss button — soft-removes the card (respawns on next activity). */
+        .scard .xbtn { background:none; border:none; color:#5b6773; cursor:pointer;
+                       user-select:none; -webkit-user-select:none;
+                       font-size:.78rem; line-height:1; padding:.1rem .2rem; border-radius:4px;
+                       opacity:0; transition:opacity .12s, color .12s; }
+        .scard:hover .xbtn { opacity:1; }
+        .scard .xbtn:hover { color:#e08791; background:rgba(176,110,124,0.12); }
+        .scard.editing .xbtn { display:none; }  /* keep it out of edit mode */
         .scard .pname { outline:none; border-radius:5px; padding:.05rem .25rem;
                         margin:-.05rem -.15rem; cursor:default; }
         .scard.editing .pname { cursor:text; background:rgba(255,255,255,0.09);
@@ -1521,7 +1553,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
           const lastp = b.lastp
             ? `<div class="lastprompt" title="your latest prompt">${escapeHtml(b.lastp)}</div>` : '';
           return `<div class="${b.cls}" draggable="true" data-sid="${escapeHtml(b.sid)}"${focusData}>
-            <div class="proj" style="${b.headStyle}"><span class="pname" contenteditable="false" spellcheck="false" data-cwd="${escapeHtml(b.cwd)}">${escapeHtml(b.name)}</span>${colorinp}${editbtn}${focusbtn}<span class="idtag">${escapeHtml(b.sid.slice(0,6))}</span></div>
+            <div class="proj" style="${b.headStyle}"><span class="pname" contenteditable="false" spellcheck="false" data-cwd="${escapeHtml(b.cwd)}">${escapeHtml(b.name)}</span>${colorinp}${editbtn}${focusbtn}<span class="idtag">${escapeHtml(b.sid.slice(0,6))}</span><button class="xbtn" title="dismiss (respawns on next activity)" onclick="event.stopPropagation()">✕</button></div>
             <div class="st">${b.stCore}<span class="age">${escapeHtml(b.age)}</span></div>
             <div class="title" contenteditable="false" spellcheck="false" data-sid="${escapeHtml(b.sid)}">${escapeHtml(b.label)}</div>
             ${lastp}
@@ -1708,7 +1740,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
           // do nothing if already editing (lets you select header text then).
           document.querySelectorAll('.scard .proj').forEach(proj=>{
             proj.addEventListener('dblclick', e=>{
-              if(e.target.closest('.swatch') || e.target.closest('.editbtn') || e.target.closest('.focusbtn')) return;
+              if(e.target.closest('.swatch, .editbtn, .focusbtn, .xbtn')) return;
               const card = proj.closest('.scard');
               if(card.classList.contains('editing')) return;
               enterEdit(card);
@@ -1720,6 +1752,21 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
               e.stopPropagation();
               if(justDragged) return;  // swallowed click (drag / outside-commit)
               sendFocus(btn.closest('.scard'));
+            });
+          });
+          // ✕ soft-dismisses the session from its collector; if the session is
+          // alive its next hook event re-ingests it and the card respawns.
+          document.querySelectorAll('.scard .xbtn').forEach(btn=>{
+            btn.addEventListener('click', async e=>{
+              e.stopPropagation();
+              if(justDragged) return;
+              const card = btn.closest('.scard');
+              try {
+                await fetch('/api/dismiss', {method:'POST',
+                  headers:{'Content-Type':'application/json'},
+                  body: JSON.stringify({sid: card.dataset.sid})});
+              } catch(err){}
+              cockpitTick();   // refresh now — don't wait for the next poll
             });
           });
           // Plain click anywhere on a focusable card's background also raises
@@ -1850,6 +1897,11 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/ui":
             ui = update_cockpit_ui(json.loads(body))
             self._send_response(json.dumps(ui), "application/json")
+
+        elif self.path == "/api/dismiss":
+            data = json.loads(body or "{}")
+            self._send_response(json.dumps(dismiss_session(data.get("sid", ""))),
+                                "application/json")
 
         else:
             self._send_response("Not Found", status=404)
