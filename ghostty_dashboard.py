@@ -396,32 +396,22 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             -webkit-mask-image: linear-gradient(to top, #000 0%, rgba(0,0,0,.5) 45%, transparent 100%);
             opacity:.55;
         }
-        /* Glowing horizon line where the grid meets the darkness, plus very
-           faint scanlines, with a slow CSS-only neon hum (no JS loop). */
+        /* Very faint CRT scanlines, fixed over the background. */
         body::after {
             content:''; position:fixed; inset:0; z-index:-1; pointer-events:none;
-            background:
-                linear-gradient(to bottom,
-                    transparent calc(58vh - 2px),
-                    rgba(255,90,185,.55) 58vh,
-                    rgba(140,90,255,0) calc(58vh + 4px)),
-                repeating-linear-gradient(to bottom,
-                    rgba(255,255,255,.014) 0 1px, transparent 1px 3px);
-            animation: neonHum 7s ease-in-out infinite;
+            background: repeating-linear-gradient(to bottom,
+                rgba(255,255,255,.014) 0 1px, transparent 1px 3px);
         }
-        @keyframes neonHum { 0%,100%{opacity:.85;} 50%{opacity:.55;} }
 
         .container { max-width: 1200px; margin: 0 auto; position: relative; }
 
+        /* No title text — just the tab strip, right-aligned, above the views. */
         header {
             display: flex;
-            justify-content: space-between;
+            justify-content: flex-end;
             align-items: center;
-            margin-bottom: 2rem;
+            margin-bottom: 1.25rem;
         }
-
-        h1 { font-size: 1.75rem; font-weight: 600; letter-spacing: .01em;
-             text-shadow: 0 0 22px rgba(255,45,149,.35), 0 0 8px rgba(130,50,235,.35); }
 
         .btn {
             padding: 0.6rem 1.2rem;
@@ -876,7 +866,6 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <body>
     <div class="container">
         <header>
-            <h1>🖥️ Ghostty Launcher</h1>
             <nav class="tabs">
                 <button class="tab active" id="tab-cockpit" onclick="switchView('cockpit')">🛩️ Cockpit</button>
                 <button class="tab" id="tab-launcher" onclick="switchView('launcher')">Launcher</button>

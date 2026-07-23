@@ -35,6 +35,16 @@ EVENT_STATE = {
 
 SUBAGENT_TOOLS = {"Task", "Agent"}
 
+# System-injected "prompts" (UserPromptSubmit fires for these too) — never show
+# them as the conversation title / last prompt.
+NON_HUMAN_PROMPTS = (
+    "<task-notification>",
+    "[SYSTEM NOTIFICATION",
+    "<local-command-caveat>",
+    "<command-name>",
+    "Caveat:",
+)
+
 
 def project_name(cwd):
     if not cwd:
@@ -152,8 +162,12 @@ def main():
         payload["detail"] = hook.get("tool_name", "")
     elif event == "UserPromptSubmit":
         prompt = " ".join((hook.get("prompt") or "").split())
-        payload["title"] = prompt[:90]        # first-wins: stable conversation name
-        payload["last_prompt"] = prompt[:220]  # latest-wins: what you just asked
+        # UserPromptSubmit also fires for system-injected turns (task
+        # notifications, command caveats). Don't let those clobber the card's
+        # title/last_prompt — keep the previously stored real human prompt.
+        if not prompt.startswith(NON_HUMAN_PROMPTS):
+            payload["title"] = prompt[:90]        # first-wins: stable conversation name
+            payload["last_prompt"] = prompt[:220]  # latest-wins: what you just asked
 
     # What Claude last said + context size/model — richest orientation signals.
     # Skip on the highest frequency event (PreToolUse) to keep tool calls snappy.
