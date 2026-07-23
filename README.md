@@ -35,17 +35,22 @@ matching Ghostty window. The plumbing:
   (Ghostty's `title` config key, which also locks the title against shell/OSC
   overrides), so each window has a deterministic, matchable name.
 - **Hammerspoon** runs a tiny focus server on `127.0.0.1:8460`
-  (`GET /focus?title=<name>` → finds a Ghostty window whose title contains that
-  string and `:focus()`es it). Install `deploy/hammerspoon-cockpit.lua` — append
-  its `-- >>> agent-cockpit … -- <<< agent-cockpit` block to
+  (`GET /focus?title=<name>&alt=<fallback>` → finds a Ghostty window whose title
+  contains the needle — falling back to `alt`, the session's cwd basename — and
+  `:focus()`es it). Ghostty runs **one process per window**, so the matcher
+  iterates every instance from `applicationsForBundleID("com.mitchellh.ghostty")`.
+  Install `deploy/hammerspoon-cockpit.lua` — append its
+  `-- >>> agent-cockpit … -- <<< agent-cockpit` block to
   `~/.hammerspoon/init.lua`, then reload Hammerspoon. It needs Hammerspoon's
   **Accessibility** permission to raise windows.
-- The dashboard proxies `GET /api/focus?title=…` to that server (short timeout,
-  graceful failure), so the browser never talks to Hammerspoon directly.
+- The dashboard proxies `GET /api/focus?title=…&alt=…` to that server (short
+  timeout, graceful failure), so the browser never talks to Hammerspoon directly.
 
 Only sessions on `machine == "mac"` with a resolved window name get the button;
-remote sessions don't. Windows launched *before* a session was titled won't have
-a stamped title and won't match — relaunch them from the Launcher.
+remote sessions don't. **Reliable matching requires launching from the Launcher**,
+which stamps a locked `--title`: Claude Code dynamically retitles unlocked
+windows with its live status summary, so windows opened by other means usually
+contain neither the project name nor the cwd basename and won't match.
 
 ### Setup
 

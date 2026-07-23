@@ -21,14 +21,32 @@ end
 local function cockpitFocusGhostty(needle)
     if not needle or needle == "" then return false end
     needle = needle:lower()
-    local app = hs.application.find("Ghostty")
-    if not app then return false end
-    for _, w in ipairs(app:allWindows()) do
-        local wt = (w:title() or ""):lower()
-        if wt ~= "" and wt:find(needle, 1, true) then
-            w:focus()
-            app:activate(true)
-            return true
+    -- Ghostty runs one process per window: hs.application.find() grabs a
+    -- single instance (often one with no windows), so iterate EVERY instance
+    -- for the bundle id.
+    local apps = hs.application.applicationsForBundleID("com.mitchellh.ghostty") or {}
+    for _, app in ipairs(apps) do
+        for _, w in ipairs(app:allWindows()) do
+            local wt = (w:title() or ""):lower()
+            if wt ~= "" and wt:find(needle, 1, true) then
+                w:focus()
+                app:activate(true)
+                return true
+            end
+        end
+    end
+    -- Fallback if the bundle lookup came back empty: scan every window on
+    -- screen and match by owning-app name.
+    if #apps == 0 then
+        for _, w in ipairs(hs.window.allWindows()) do
+            local app = w:application()
+            local an = app and (app:name() or ""):lower() or ""
+            local wt = (w:title() or ""):lower()
+            if an:find("ghostty", 1, true) and wt ~= "" and wt:find(needle, 1, true) then
+                w:focus()
+                if app then app:activate(true) end
+                return true
+            end
         end
     end
     return false
