@@ -46,6 +46,32 @@ NON_HUMAN_PROMPTS = (
 )
 
 
+def tool_detail(tool_name, tool_input):
+    """'Bash: npm test' — tool name plus a concise target pulled from its args.
+    Fully defensive: tool_input may be missing or any shape; never raises."""
+    name = tool_name or ""
+    target = ""
+    try:
+        ti = tool_input if isinstance(tool_input, dict) else {}
+        if name == "Bash":
+            target = " ".join(str(ti.get("command") or "").split())
+        elif name in ("Edit", "Write", "Read", "NotebookEdit"):
+            fp = str(ti.get("file_path") or "")
+            target = os.path.basename(fp.rstrip("/")) if fp else ""
+        elif name in ("Grep", "Glob"):
+            target = str(ti.get("pattern") or "")
+        elif name in ("Task", "Agent"):
+            target = str(ti.get("description") or "")
+        elif name == "WebFetch":
+            target = str(ti.get("url") or "")
+        elif name == "WebSearch":
+            target = str(ti.get("query") or "")
+    except Exception:
+        target = ""
+    detail = f"{name}: {target}" if target else name
+    return detail[:80]
+
+
 def project_name(cwd):
     if not cwd:
         return "?"
@@ -159,7 +185,8 @@ def main():
     if event == "Notification":
         payload["detail"] = (hook.get("message") or "")[:120]
     elif event in ("PreToolUse", "PostToolUse"):
-        payload["detail"] = hook.get("tool_name", "")
+        payload["detail"] = tool_detail(hook.get("tool_name", ""),
+                                        hook.get("tool_input"))
     elif event == "UserPromptSubmit":
         prompt = " ".join((hook.get("prompt") or "").split())
         # UserPromptSubmit also fires for system-injected turns (task
@@ -181,6 +208,11 @@ def main():
             payload["context_tokens"] = info["context_tokens"]
         if info["model"]:
             payload["model"] = info["model"]
+
+    # Permission mode (default / plan / acceptEdits / bypassPermissions) —
+    # present on most hook events; the cockpit badges non-default modes.
+    if hook.get("permission_mode"):
+        payload["permission_mode"] = str(hook["permission_mode"])[:32]
 
     if os.environ.get("AGENT_WINDOW_NAME"):
         payload["window_name"] = os.environ["AGENT_WINDOW_NAME"]

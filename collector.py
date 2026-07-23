@@ -94,6 +94,9 @@ def ingest(payload):
             "model": payload.get("model") or prev.get("model", ""),
             # Live subagent count (best-effort).
             "subagents": payload.get("subagents", prev.get("subagents", 0)),
+            # Permission mode (plan / acceptEdits / bypassPermissions / default),
+            # latest-wins with fallback to the last known value.
+            "permission_mode": payload.get("permission_mode") or prev.get("permission_mode", ""),
             # Explicit window identity, if the emitter had it.
             "window_name": payload.get("window_name") or prev.get("window_name", ""),
             "window_color": payload.get("window_color") or prev.get("window_color", ""),

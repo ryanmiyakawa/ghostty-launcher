@@ -778,6 +778,21 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                        padding:.05rem .4rem; border-radius:999px; }
         .scard .ctx { font-size:.64rem; color:#8b98a5; background:rgba(255,255,255,0.05);
                       padding:.05rem .4rem; border-radius:999px; font-family:ui-monospace,Menlo,monospace; }
+        /* High-context nudge: amber past CTX_WARN tokens ("time to /compact"),
+           red past CTX_CRIT (context limit territory). */
+        .scard .ctx.ctx-warn { color:#fbbf24; background:rgba(251,191,36,.10);
+                               box-shadow:0 0 0 1px rgba(251,191,36,.35) inset; }
+        .scard .ctx.ctx-crit { color:#f87171; background:rgba(248,113,113,.12);
+                               box-shadow:0 0 0 1px rgba(248,113,113,.45) inset; }
+        /* Permission-mode badge — only shown for non-default modes. */
+        .scard .pmode { font-size:.62rem; font-weight:700; letter-spacing:.03em;
+                        padding:.05rem .4rem; border-radius:999px; flex:none; }
+        .scard .pm-plan   { color:#7fd4e0; background:rgba(0,225,255,.10);
+                            box-shadow:0 0 0 1px rgba(0,225,255,.25) inset; }
+        .scard .pm-auto   { color:#b8a6e8; background:rgba(139,92,246,.14);
+                            box-shadow:0 0 0 1px rgba(139,92,246,.30) inset; }
+        .scard .pm-bypass { color:#ffb35c; background:rgba(255,90,60,.16);
+                            box-shadow:0 0 0 1px rgba(255,120,60,.45) inset; }
         .scard .age { margin-left:auto; font-size:.68rem; color:#64748b; }
         /* The whole name row is the color band — the window color tints the
            header full-bleed, so each card wears its Ghostty identity. */
@@ -1306,6 +1321,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
           idle:{l:'done',c:'done'},
         };
         const CORDER = {needs_input:0, working:1, starting:2, done:3, idle:3, stale:4};
+        // Context-size nudge thresholds (tokens): amber = time to /compact,
+        // red = context limit territory.
+        const CTX_WARN = 150000, CTX_CRIT = 185000;
         let cockpitTimer = null;
         let manualOrder = [];   // session_id[] — user's drag order
         let cpBusy = false;     // editing a label or dragging → pause re-render
@@ -1374,8 +1392,17 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 ? `<button class="focusbtn" title="focus Ghostty window" data-title="${escapeHtml(s.window_name)}" onclick="event.stopPropagation()">⤢</button>` : '';
               const subs = (s.subagents>0)
                 ? `<span class="subs">▷ ${s.subagents} sub${s.subagents>1?'s':''}</span>` : '';
+              const PMODES = {plan:{t:'plan',c:'pm-plan'},
+                              acceptEdits:{t:'auto-edit',c:'pm-auto'},
+                              bypassPermissions:{t:'BYPASS',c:'pm-bypass'}};
+              const pmInfo = PMODES[s.permission_mode];
+              const pmode = pmInfo
+                ? `<span class="pmode ${pmInfo.c}" title="permission mode: ${escapeHtml(s.permission_mode)}">${pmInfo.t}</span>` : '';
+              const ctxCls = s.context_tokens>=CTX_CRIT ? ' ctx-crit'
+                           : s.context_tokens>=CTX_WARN ? ' ctx-warn' : '';
+              const ctxTip = ctxCls ? ' — time to /compact' : '';
               const ctx = s.context_tokens
-                ? `<span class="ctx" title="context tokens / model">${fmtTok(s.context_tokens)}${s.model?(' · '+escapeHtml(shortModel(s.model))):''}</span>` : '';
+                ? `<span class="ctx${ctxCls}" title="context tokens / model${ctxTip}">${fmtTok(s.context_tokens)}${s.model?(' · '+escapeHtml(shortModel(s.model))):''}</span>` : '';
               const idtag = `<span class="idtag">${escapeHtml((s.session_id||'').slice(0,6))}</span>`;
               const label = s.custom_title || s.title || '';
               const lastp = s.last_prompt
@@ -1383,12 +1410,12 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
               const activity = `<div class="activity">${escapeHtml(s.activity||'')}</div>`;
               html += `<div class="scard s-${ui.c}" draggable="true" data-sid="${escapeHtml(s.session_id)}">
                 <div class="proj" style="${headStyle}"><span class="pname" contenteditable="false" spellcheck="false" data-cwd="${escapeHtml(cwd)}">${escapeHtml(name)}</span>${colorinp}${editbtn}${focusbtn}${idtag}</div>
-                <div class="st">${marker}<span class="state">${ui.l}</span>${subs}${ctx}<span class="age">${agoSec(s.age)}</span></div>
+                <div class="st">${marker}<span class="state">${ui.l}</span>${pmode}${subs}${ctx}<span class="age">${agoSec(s.age)}</span></div>
                 <div class="title" contenteditable="false" spellcheck="false" data-sid="${escapeHtml(s.session_id)}">${escapeHtml(label)}</div>
                 ${lastp}
                 ${activity}
                 <div class="foot">
-                  <div class="detail">${escapeHtml(s.detail||'')||'&nbsp;'}</div>
+                  <div class="detail" title="${escapeHtml(s.detail||'')}">${escapeHtml(s.detail||'')||'&nbsp;'}</div>
                   <div class="cwd">${escapeHtml(s.cwd||'')}</div>
                 </div>
               </div>`;
