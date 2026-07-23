@@ -8,8 +8,11 @@ import json
 import os
 import subprocess
 import sys
+import threading
+import time
+import urllib.request
 import webbrowser
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 
 CONFIG_PATH = os.path.expanduser("~/.claude/ghostty_dashboard_config.json")
@@ -17,6 +20,137 @@ PORT = 8457
 
 STATUS_REPO = os.path.expanduser("~/project-status")
 STATUS_JSON = os.path.join(STATUS_REPO, "status.json")
+
+# ---- Cockpit: live agent status aggregation ----------------------------------
+# The Cockpit tab shows every running Claude Code session across all machines.
+# Each machine runs a localhost-only collector (collector.py, :8458). This
+# dashboard reads the local one directly and every remote one through an SSH
+# tunnel it maintains itself (hosts from agent-cockpit-hosts.json). See README.
+LOCAL_COLLECTOR = int(os.environ.get("AGENT_COLLECTOR_PORT", "8458"))
+HOSTS_PATH = os.path.expanduser("~/.claude/agent-cockpit-hosts.json")
+
+_tunnel_state = {}          # name -> {"up": bool, "error": str, "since": float}
+_tstate_lock = threading.Lock()
+
+
+def cockpit_hosts():
+    try:
+        with open(HOSTS_PATH) as f:
+            return [h for h in json.load(f).get("hosts", []) if h.get("ssh")]
+    except (IOError, json.JSONDecodeError):
+        return []
+
+
+def _set_tunnel(name, up, error=""):
+    with _tstate_lock:
+        prev = _tunnel_state.get(name, {})
+        if prev.get("up") != up:
+            prev["since"] = time.time()
+        prev.update({"up": up, "error": error})
+        prev.setdefault("since", time.time())
+        _tunnel_state[name] = prev
+
+
+def _tunnel_loop(host):
+    """Keep one SSH local-forward alive; restart whenever it drops."""
+    name = host.get("name", host["ssh"])
+    lport = int(host["local_port"])
+    cmd = [
+        "ssh", "-N", "-T",
+        "-o", "BatchMode=yes",
+        "-o", "ExitOnForwardFailure=yes",
+        "-o", "ConnectTimeout=10",
+        "-o", "ServerAliveInterval=15",
+        "-o", "ServerAliveCountMax=3",
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-L", f"127.0.0.1:{lport}:127.0.0.1:{LOCAL_COLLECTOR}",
+        host["ssh"],
+    ]
+    while True:
+        try:
+            proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.PIPE)
+            time.sleep(2)
+            if proc.poll() is None:
+                _set_tunnel(name, True)
+            err = (proc.stderr.read() or b"").decode(errors="replace")[-200:] \
+                if proc.stderr else ""
+            proc.wait()
+            _set_tunnel(name, False, err.strip() or "tunnel exited")
+        except Exception as e:
+            _set_tunnel(name, False, str(e))
+        time.sleep(3)
+
+
+def start_cockpit_tunnels():
+    for host in cockpit_hosts():
+        if host.get("local_port"):
+            threading.Thread(target=_tunnel_loop, args=(host,), daemon=True).start()
+
+
+def fetch_collector(port, timeout=1.0):
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/status",
+                                    timeout=timeout) as r:
+            return json.loads(r.read().decode())
+    except Exception:
+        return None
+
+
+def _launcher_dirs():
+    """[(normalized_dir, name, color)] longest-first, from the launcher config —
+    the single source of truth for a session's window identity/color."""
+    out = []
+    for p in load_config():
+        d = p.get("directory")
+        if not d:
+            continue
+        out.append((os.path.expanduser(d).rstrip("/"), p.get("name", ""),
+                    p.get("background", "")))
+    out.sort(key=lambda t: len(t[0]), reverse=True)
+    return out
+
+
+def enrich(sess):
+    """Give a session its window name/color by matching cwd to the launcher
+    config, unless it already carried explicit identity from its shell."""
+    cwd = (sess.get("cwd") or "").rstrip("/")
+    if not sess.get("window_name") or not sess.get("window_color"):
+        for norm, name, color in _launcher_dirs():
+            if norm and (cwd == norm or cwd.startswith(norm + "/")):
+                if not sess.get("window_name"):
+                    sess["window_name"] = name
+                if not sess.get("window_color"):
+                    sess["window_color"] = color
+                break
+    return sess
+
+
+def cockpit_live():
+    """Merge local + every configured remote collector into one machine list."""
+    machines = []
+    local = fetch_collector(LOCAL_COLLECTOR)
+    machines.append({
+        "name": local.get("machine", "mac") if local else "mac",
+        "label": "this mac",
+        "reachable": local is not None,
+        "error": "" if local else "local collector down",
+        "sessions": [enrich(s) for s in local.get("sessions", [])] if local else [],
+    })
+    for host in cockpit_hosts():
+        name = host.get("name", host["ssh"])
+        with _tstate_lock:
+            ts = dict(_tunnel_state.get(name, {}))
+        data = fetch_collector(host["local_port"]) if ts.get("up") else None
+        machines.append({
+            "name": data.get("machine", name) if data else name,
+            "label": host["ssh"],
+            "reachable": data is not None,
+            "error": "" if data else (ts.get("error") or "tunnel down"),
+            "sessions": data.get("sessions", []) if data else [],
+        })
+    return machines
 
 
 def load_status():
@@ -461,6 +595,63 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
             font-size: 0.85em;
         }
+
+        /* ---- Cockpit (live agent status) ---- */
+        .cockpit-bar { display:flex; align-items:center; justify-content:flex-end;
+                       gap:.75rem; margin-bottom:1rem; min-height:1.2rem; }
+        .cockpit-bar .sub { font-size:.8rem; color:#94a3b8; }
+        .machines { display:flex; flex-direction:column; gap:1.1rem; }
+        .machine-head { display:flex; align-items:center; gap:.55rem; margin-bottom:.55rem;
+                        font-size:.8rem; text-transform:uppercase; letter-spacing:.06em; color:#94a3b8; }
+        .machine-head .mdot { width:.55rem; height:.55rem; border-radius:50%; }
+        .machine-head .mlabel { font-family:ui-monospace,Menlo,monospace; text-transform:none;
+                                letter-spacing:0; opacity:.55; font-size:.72rem; }
+        .machine-head .merr { color:#f43f5e; text-transform:none; letter-spacing:0; font-size:.72rem; }
+        .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(250px,1fr)); gap:.75rem; }
+        .scard { background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.08);
+                 border-left-width:4px; border-radius:12px; padding:.85rem .95rem;
+                 position:relative; overflow:hidden; }
+        .scard .st { display:flex; align-items:center; gap:.5rem; margin-bottom:.4rem; }
+        .scard .glyph { font-size:.9rem; }
+        .scard .state { font-size:.7rem; font-weight:700; text-transform:uppercase; letter-spacing:.05em; }
+        .scard .subs { font-size:.66rem; color:#cbd5e1; background:rgba(255,255,255,0.08);
+                       padding:.05rem .4rem; border-radius:999px; }
+        .scard .age { margin-left:auto; font-size:.68rem; color:#64748b; }
+        .scard .proj { font-size:1.02rem; font-weight:650; margin-bottom:.2rem;
+                       display:flex; align-items:center; gap:.42rem; }
+        .scard .swatch { width:.72rem; height:.72rem; border-radius:3px; flex:none;
+                         box-shadow:0 0 0 1px rgba(255,255,255,0.18) inset; }
+        .scard .idtag { font-size:.6rem; color:#64748b; font-family:ui-monospace,Menlo,monospace;
+                        margin-left:auto; }
+        .scard .title { font-size:.79rem; color:#e2e8f0; opacity:.82; margin-bottom:.25rem;
+                        overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+        .scard .activity { font-size:.75rem; color:#94a3b8; line-height:1.4; margin-bottom:.3rem;
+                           display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical;
+                           overflow:hidden; }
+        .scard .detail { font-size:.72rem; color:#64748b; overflow:hidden;
+                         text-overflow:ellipsis; white-space:nowrap; }
+        .scard .cwd { margin-top:.35rem; font-size:.65rem; color:#5b6773;
+                      font-family:ui-monospace,Menlo,monospace;
+                      overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+        .scard.s-need { border-left-color:#f43f5e; box-shadow:0 0 0 1px rgba(244,63,94,0.22); }
+        .scard.s-need .state { color:#f43f5e; }
+        .scard.s-working { border-left-color:#22c55e; }
+        .scard.s-working .state { color:#22c55e; }
+        .scard.s-done { border-left-color:#38bdf8; }
+        .scard.s-done .state { color:#38bdf8; }
+        .scard.s-stale { border-left-color:#64748b; opacity:.55; }
+        .scard.s-stale .state { color:#64748b; }
+        .scard.s-starting { border-left-color:#a78bfa; }
+        .scard.s-starting .state { color:#a78bfa; }
+        .scard.s-need::after { content:""; position:absolute; inset:0; border-radius:12px;
+            pointer-events:none; animation:spulse 1.6s ease-in-out infinite; }
+        @keyframes spulse { 0%{box-shadow:0 0 0 0 rgba(244,63,94,0.45);}
+            70%{box-shadow:0 0 0 8px rgba(244,63,94,0);} 100%{box-shadow:0 0 0 0 rgba(244,63,94,0);} }
+        .work-pip { width:.5rem; height:.5rem; border-radius:50%; background:#22c55e;
+                    animation:sblink 1.1s ease-in-out infinite; }
+        @keyframes sblink { 0%,100%{opacity:1;} 50%{opacity:.25;} }
+        .machines .empty { color:#64748b; font-size:.85rem; padding:.3rem 0; }
+        .machines .none { color:#64748b; text-align:center; padding:4rem 1rem; }
     </style>
 </head>
 <body>
@@ -468,12 +659,20 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         <header>
             <h1>🖥️ Ghostty Launcher</h1>
             <nav class="tabs">
-                <button class="tab active" id="tab-launcher" onclick="switchView('launcher')">Launcher</button>
-                <button class="tab" id="tab-status" onclick="switchView('status')">Status</button>
+                <button class="tab active" id="tab-cockpit" onclick="switchView('cockpit')">🛩️ Cockpit</button>
+                <button class="tab" id="tab-launcher" onclick="switchView('launcher')">Launcher</button>
+                <button class="tab" id="tab-status" onclick="switchView('status')">History</button>
             </nav>
         </header>
 
-        <div id="view-launcher">
+        <div id="view-cockpit">
+            <div class="cockpit-bar">
+                <span class="sub" id="cockpit-sub"></span>
+            </div>
+            <div class="machines" id="machines"><div class="none">Connecting…</div></div>
+        </div>
+
+        <div id="view-launcher" style="display:none">
             <div class="cards" id="cards"></div>
         </div>
 
@@ -741,12 +940,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         let statusLoaded = false;
 
         function switchView(name) {
-            const isStatus = name === 'status';
-            document.getElementById('view-launcher').style.display = isStatus ? 'none' : '';
-            document.getElementById('view-status').style.display = isStatus ? '' : 'none';
-            document.getElementById('tab-launcher').classList.toggle('active', !isStatus);
-            document.getElementById('tab-status').classList.toggle('active', isStatus);
-            if (isStatus && !statusLoaded) loadStatus();
+            for (const v of ['cockpit', 'launcher', 'status']) {
+                document.getElementById('view-' + v).style.display = (v === name) ? '' : 'none';
+                document.getElementById('tab-' + v).classList.toggle('active', v === name);
+            }
+            if (name === 'status' && !statusLoaded) loadStatus();
         }
 
         async function loadStatus(manual) {
@@ -888,9 +1086,84 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             if (visible && !document.hidden) loadStatus(false);
         }, 120000);
 
-        // Show add card immediately, then load data
+        // ---- Cockpit (live agent status) ----
+        const CUI = {
+          needs_input:{g:'🔴',l:'needs you',c:'need'},
+          working:{g:'🟢',l:'working',c:'working'},
+          done:{g:'🔵',l:'done',c:'done'},
+          starting:{g:'🟣',l:'starting',c:'starting'},
+          stale:{g:'⚪',l:'stale',c:'stale'},
+          idle:{g:'🔵',l:'done',c:'done'},
+        };
+        const CORDER = {needs_input:0, working:1, starting:2, done:3, idle:3, stale:4};
+        let cockpitTimer = null;
+
+        function agoSec(a){ if(a==null) return ''; a=Math.max(0,a|0);
+          if(a<60) return a+'s'; if(a<3600) return (a/60|0)+'m'; return (a/3600|0)+'h'; }
+
+        async function cockpitTick(){
+          let machines = [];
+          try { machines = await (await fetch('/api/live')).json(); }
+          catch(e){ return; }
+          let need=0, work=0, total=0, html='';
+          for(const m of machines){
+            const sess = (m.sessions||[]).slice()
+              .sort((a,b)=>(CORDER[a.state]??9)-(CORDER[b.state]??9));
+            total += sess.length;
+            need += sess.filter(s=>s.state==='needs_input').length;
+            work += sess.filter(s=>s.state==='working').length;
+            const mdot = m.reachable ? '#22c55e' : '#f43f5e';
+            html += `<div><div class="machine-head">
+                <span class="mdot" style="background:${mdot}"></span>
+                <span>${escapeHtml(m.name)}</span>
+                <span class="mlabel">${escapeHtml(m.label||'')}</span>
+                ${m.reachable?'':`<span class="merr">· ${escapeHtml(m.error||'unreachable')}</span>`}
+              </div>`;
+            if(!sess.length){
+              html += `<div class="empty">${m.reachable?'no active sessions':'—'}</div></div>`;
+              continue;
+            }
+            html += '<div class="grid">';
+            for(const s of sess){
+              const ui = CUI[s.state] || {g:'⚪', l:s.state, c:'stale'};
+              const pip = s.state==='working'
+                ? '<span class="work-pip"></span>' : `<span class="glyph">${ui.g}</span>`;
+              const name = s.window_name || s.project || '?';
+              const swatch = s.window_color
+                ? `<span class="swatch" style="background:${escapeHtml(s.window_color)}"></span>` : '';
+              const subs = (s.subagents>0)
+                ? `<span class="subs">▷ ${s.subagents} sub${s.subagents>1?'s':''}</span>` : '';
+              const idtag = `<span class="idtag">${escapeHtml((s.session_id||'').slice(0,6))}</span>`;
+              const title = s.title ? `<div class="title">${escapeHtml(s.title)}</div>` : '';
+              const activity = s.activity ? `<div class="activity">${escapeHtml(s.activity)}</div>` : '';
+              html += `<div class="scard s-${ui.c}">
+                <div class="st">${pip}<span class="state">${ui.l}</span>${subs}<span class="age">${agoSec(s.age)}</span></div>
+                <div class="proj">${swatch}${escapeHtml(name)}${idtag}</div>
+                ${title}${activity}
+                <div class="detail">${escapeHtml(s.detail||'')||'&nbsp;'}</div>
+                <div class="cwd">${escapeHtml(s.cwd||'')}</div>
+              </div>`;
+            }
+            html += '</div></div>';
+          }
+          document.getElementById('machines').innerHTML = total ? html :
+            '<div class="none">No sessions reporting yet.<br>Start a Claude session on any wired machine.</div>';
+          const bits = [];
+          if(need) bits.push(need+' need you');
+          if(work) bits.push(work+' working');
+          bits.push(total+' total');
+          document.getElementById('cockpit-sub').textContent =
+            bits.join(' · ') + ' · ' + new Date().toLocaleTimeString();
+          document.title = (need ? `(${need}!) ` : '') + 'Ghostty Launcher';
+        }
+        function startCockpit(){
+          if(!cockpitTimer){ cockpitTick(); cockpitTimer = setInterval(cockpitTick, 1500); }
+        }
+
+        // Cockpit is the default view; launcher data preloads in the background.
         renderCards();
         loadProjects();
+        startCockpit();
     </script>
 </body>
 </html>
@@ -919,6 +1192,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send_response(json.dumps(load_config()), "application/json")
         elif self.path == "/api/status":
             self._send_response(json.dumps(load_status()), "application/json")
+        elif self.path == "/api/live":
+            self._send_response(json.dumps(cockpit_live()), "application/json")
         elif self.path.startswith("/api/history"):
             q = parse_qs(urlparse(self.path).query)
             self._send_response(json.dumps(load_history(q.get("project", [""])[0])),
@@ -950,7 +1225,8 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    server = HTTPServer(("127.0.0.1", PORT), Handler)
+    start_cockpit_tunnels()
+    server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     url = f"http://127.0.0.1:{PORT}"
     print(f"Ghostty Launcher running at {url}")
     if "--no-browser" not in sys.argv:

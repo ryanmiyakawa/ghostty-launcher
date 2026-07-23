@@ -1,0 +1,5 @@
+{
+  "_comment": "Remote machines to aggregate. The cockpit opens an SSH tunnel per host (local_port -> that host's 127.0.0.1:8458) and merges its sessions. 'ssh' is whatever you'd type after `ssh` (uses your ~/.ssh/config + keys). Give each a unique local_port. The Mac's own collector is always included automatically.",
+  "hosts": [
+  ]
+}

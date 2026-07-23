@@ -1,0 +1,23 @@
+# systemd unit template for VPS collectors.
+# On each VPS:
+#   1. Copy agent-collector.py and agent-status-emit.py to ~/.claude/
+#   2. Copy this file to ~/.config/systemd/user/agent-collector.service
+#      (edit AGENT_COCKPIT_MACHINE to a short, unique name for that host)
+#   3. systemctl --user daemon-reload
+#      systemctl --user enable --now agent-collector
+#      loginctl enable-linger $USER      # keep it running after you log out
+#   4. Add the same hooks block (see settings.json) to that machine's
+#      ~/.claude/settings.json so its sessions report locally.
+[Unit]
+Description=Claude agent status collector (localhost only)
+After=network.target
+
+[Service]
+Type=simple
+Environment=AGENT_COCKPIT_MACHINE=CHANGE_ME
+ExecStart=/usr/bin/python3 %h/.claude/agent-collector.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target

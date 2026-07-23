@@ -1,0 +1,13 @@
+{
+  "_comment": "Merge this 'hooks' block into ~/.claude/settings.json on every machine you want to appear in the Cockpit. It makes each Claude Code session report its state to the local collector. Safe: the emitter always exits 0 and can never block Claude.",
+  "hooks": {
+    "SessionStart":     [{"hooks": [{"type": "command", "command": "python3 ~/.claude/agent-status-emit.py"}]}],
+    "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "python3 ~/.claude/agent-status-emit.py"}]}],
+    "PreToolUse":       [{"matcher": "*", "hooks": [{"type": "command", "command": "python3 ~/.claude/agent-status-emit.py"}]}],
+    "PostToolUse":      [{"matcher": "*", "hooks": [{"type": "command", "command": "python3 ~/.claude/agent-status-emit.py"}]}],
+    "Notification":     [{"hooks": [{"type": "command", "command": "python3 ~/.claude/agent-status-emit.py"}]}],
+    "Stop":             [{"hooks": [{"type": "command", "command": "python3 ~/.claude/agent-status-emit.py"}]}],
+    "SubagentStop":     [{"hooks": [{"type": "command", "command": "python3 ~/.claude/agent-status-emit.py"}]}],
+    "SessionEnd":       [{"hooks": [{"type": "command", "command": "python3 ~/.claude/agent-status-emit.py"}]}]
+  }
+}
