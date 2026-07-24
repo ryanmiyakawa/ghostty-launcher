@@ -46,7 +46,14 @@ def load_cockpit_ui():
     ui.setdefault("labels", {})     # session_id -> custom note label
     ui.setdefault("order", [])      # session_id[] manual ordering
     ui.setdefault("identity", {})   # directory -> {name, color} window identity override
+    ui.setdefault("tunnels", {})    # host name -> {"enabled": bool}; absent = enabled
     return ui
+
+
+def tunnel_enabled(ui, name):
+    """Hosts default to enabled; only an explicit {"enabled": false} pauses."""
+    ent = (ui.get("tunnels") or {}).get(name)
+    return not (isinstance(ent, dict) and ent.get("enabled") is False)
 
 
 def _is_hex_color(s):
@@ -68,6 +75,15 @@ def update_cockpit_ui(patch):
                     ui["labels"].pop(sid, None)
         if "order" in patch and isinstance(patch["order"], list):
             ui["order"] = [s for s in patch["order"] if isinstance(s, str)]
+        if "tunnel" in patch and isinstance(patch["tunnel"], dict):
+            # Per-host tunnel on/off, persisted so a paused host stays paused
+            # across dashboard restarts. Enabled hosts carry no entry.
+            name = (patch["tunnel"].get("name") or "").strip()[:80]
+            if name:
+                if patch["tunnel"].get("enabled") is False:
+                    ui["tunnels"][name] = {"enabled": False}
+                else:
+                    ui["tunnels"].pop(name, None)
         if "identity" in patch:
             # Window name/color override, keyed by directory so it sticks across
             # relaunches and covers every session under that dir.
@@ -116,9 +132,23 @@ def _set_tunnel(name, up, error=""):
         _tunnel_state[name] = prev
 
 
+# Per-host tunnel control: a "run" Event the worker parks on when the host is
+# paused, plus the live ssh child so a pause can terminate it immediately.
+_tunnel_ctl = {}  # name -> {"run": threading.Event, "proc": Popen | None}
+
+
+def _tunnel_paused(name):
+    ctl = _tunnel_ctl.get(name)
+    return bool(ctl) and not ctl["run"].is_set()
+
+
 def _tunnel_loop(host):
-    """Keep one SSH local-forward alive; restart whenever it drops."""
+    """Keep one SSH local-forward alive while the host is enabled. Paused →
+    terminate the child and park on the run event. Down-but-enabled → retry
+    with exponential backoff (3s → 60s, reset on success) so an unreachable
+    host (off VPN, machine gone) isn't hammered forever."""
     name = host.get("name", host["ssh"])
+    ctl = _tunnel_ctl[name]
     lport = int(host["local_port"])
     cmd = [
         "ssh", "-N", "-T",
@@ -131,27 +161,82 @@ def _tunnel_loop(host):
         "-L", f"127.0.0.1:{lport}:127.0.0.1:{LOCAL_COLLECTOR}",
         host["ssh"],
     ]
+    backoff = 3
     while True:
+        if not ctl["run"].is_set():
+            _set_tunnel(name, False, "")
+            ctl["run"].wait()
+            backoff = 3
+            continue
+        proc = None
         try:
             proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL,
                                     stdout=subprocess.DEVNULL,
                                     stderr=subprocess.PIPE)
+            ctl["proc"] = proc
             time.sleep(2)
             if proc.poll() is None:
                 _set_tunnel(name, True)
+                backoff = 3   # reset once the tunnel establishes
+            # Watch the child; a pause mid-flight terminates it promptly.
+            while proc.poll() is None:
+                if not ctl["run"].is_set():
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                    break
+                time.sleep(0.5)
             err = (proc.stderr.read() or b"").decode(errors="replace")[-200:] \
                 if proc.stderr else ""
             proc.wait()
-            _set_tunnel(name, False, err.strip() or "tunnel exited")
+            _set_tunnel(name, False, "" if not ctl["run"].is_set()
+                        else (err.strip() or "tunnel exited"))
         except Exception as e:
             _set_tunnel(name, False, str(e))
-        time.sleep(3)
+        finally:
+            ctl["proc"] = None
+        if ctl["run"].is_set():
+            # Backoff, but wake early if the host gets paused meanwhile.
+            slept = 0.0
+            while slept < backoff and ctl["run"].is_set():
+                time.sleep(0.5)
+                slept += 0.5
+            backoff = min(backoff * 2, 60)
+
+
+def set_tunnel_enabled(name, enabled):
+    """Flip a host's tunnel on/off: persist the choice, then wake or park the
+    worker (terminating the live ssh child on pause)."""
+    update_cockpit_ui({"tunnel": {"name": name, "enabled": bool(enabled)}})
+    ctl = _tunnel_ctl.get(name)
+    if not ctl:
+        return {"ok": False, "error": "unknown host"}
+    if enabled:
+        ctl["run"].set()
+    else:
+        ctl["run"].clear()
+        proc = ctl.get("proc")
+        if proc and proc.poll() is None:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+    return {"ok": True, "name": name, "enabled": bool(enabled)}
 
 
 def start_cockpit_tunnels():
+    ui = load_cockpit_ui()
     for host in cockpit_hosts():
-        if host.get("local_port"):
-            threading.Thread(target=_tunnel_loop, args=(host,), daemon=True).start()
+        if not host.get("local_port"):
+            continue
+        name = host.get("name", host["ssh"])
+        ev = threading.Event()
+        if tunnel_enabled(ui, name):
+            ev.set()
+        _tunnel_ctl[name] = {"run": ev, "proc": None}
+        threading.Thread(target=_tunnel_loop, args=(host,), daemon=True).start()
 
 
 def fetch_collector(port, timeout=1.0):
@@ -231,10 +316,22 @@ def cockpit_live():
         "label": "this mac",
         "reachable": local is not None,
         "error": "" if local else "local collector down",
+        "local": True,
+        "paused": False,
         "sessions": [enrich(s, overrides) for s in local.get("sessions", [])] if local else [],
     })
     for host in cockpit_hosts():
         name = host.get("name", host["ssh"])
+        paused = _tunnel_paused(name)
+        if paused:
+            # Deliberately offline — not an error, no session cards, but the
+            # section stays listed so the user can toggle it back on.
+            machines.append({
+                "name": name, "label": host["ssh"], "host": name,
+                "reachable": False, "error": "", "local": False,
+                "paused": True, "sessions": [],
+            })
+            continue
         with _tstate_lock:
             ts = dict(_tunnel_state.get(name, {}))
         data = fetch_collector(host["local_port"]) if ts.get("up") else None
@@ -243,8 +340,11 @@ def cockpit_live():
         machines.append({
             "name": data.get("machine", name) if data else name,
             "label": host["ssh"],
+            "host": name,
             "reachable": data is not None,
             "error": "" if data else (ts.get("error") or "tunnel down"),
+            "local": False,
+            "paused": False,
             "sessions": sessions,
         })
 
@@ -393,8 +493,9 @@ def dismiss_session(sid):
     its next hook event re-ingests it and the card respawns (by design)."""
     if not sid:
         return {"ok": False, "error": "no sid"}
-    ports = [LOCAL_COLLECTOR] + [int(h["local_port"]) for h in cockpit_hosts()
-                                 if h.get("local_port")]
+    ports = [LOCAL_COLLECTOR] + [
+        int(h["local_port"]) for h in cockpit_hosts()
+        if h.get("local_port") and not _tunnel_paused(h.get("name", h["ssh"]))]
     ok = False
     for port in ports:
         try:
@@ -831,6 +932,20 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         .machine-head .mlabel { font-family:ui-monospace,Menlo,monospace; text-transform:none;
                                 letter-spacing:0; opacity:.55; font-size:.72rem; }
         .machine-head .merr { color:#b5707c; text-transform:none; letter-spacing:0; font-size:.72rem; }
+        /* Tunnel on/off chip + paused state (deliberate, dimmed — not an error). */
+        .machine-head.mh-paused { opacity:.6; }
+        .machine-head .mpaused { color:#8b98a5; text-transform:none; letter-spacing:0;
+                                 font-size:.72rem; }
+        .machine-head .tglbtn { background:rgba(255,255,255,0.06); border:1px solid rgba(148,163,184,.3);
+                                color:#8b98a5; cursor:pointer; user-select:none; -webkit-user-select:none;
+                                font-size:.66rem; letter-spacing:.02em; text-transform:none;
+                                padding:.08rem .5rem; border-radius:999px;
+                                transition:color .12s, border-color .12s, background .12s; }
+        .machine-head .tglbtn:hover { color:#e2e8f0; border-color:rgba(148,163,184,.55);
+                                      background:rgba(255,255,255,0.10); }
+        .machine-head .tglbtn.off { color:#7fd4e0; border-color:rgba(0,225,255,.35);
+                                    background:rgba(0,225,255,.07); }
+        .machine-head .tglbtn.off:hover { color:#aef2fa; border-color:rgba(0,225,255,.6); }
         /* auto-fit (not -fill) collapses empty trailing tracks, and the bounded
            track max keeps cards sane on huge windows — so leftover width splits
            evenly left/right via justify-content:center instead of piling right. */
@@ -1589,7 +1704,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
           // unchanged we patch nodes in place; a rebuild only happens when the
           // layout itself changes.
           const roster = JSON.stringify(groups.map(g=>[
-            g.m.name, g.m.label, g.m.reachable, g.m.error,
+            g.m.name, g.m.label, g.m.reachable, g.m.error, !!g.m.paused,
             g.bits.map(b=>[b.sid, b.canFocus, !!b.lastp])
           ]));
           const container = document.getElementById('machines');
@@ -1602,15 +1717,22 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             let html = '';
             for(const g of groups){
               const m = g.m;
-              const mdot = m.reachable ? '#6f9e80' : '#b06e7c';
-              html += `<div><div class="machine-head">
+              const mdot = m.paused ? '#5a6472' : (m.reachable ? '#6f9e80' : '#b06e7c');
+              // Remote machines get a tunnel on/off chip; paused is a chosen
+              // state, rendered dimmed — never as an error.
+              const tgl = m.local ? '' : (m.paused
+                ? `<button class="tglbtn off" data-host="${escapeHtml(m.host||m.name)}" data-on="0" title="tunnel paused — click to reconnect">▶ connect</button>`
+                : `<button class="tglbtn" data-host="${escapeHtml(m.host||m.name)}" data-on="1" title="pause the SSH tunnel to this host">⏸ pause</button>`);
+              html += `<div><div class="machine-head${m.paused?' mh-paused':''}">
                   <span class="mdot" style="background:${mdot}"></span>
                   <span>${escapeHtml(m.name)}</span>
                   <span class="mlabel">${escapeHtml(m.label||'')}</span>
-                  ${m.reachable?'':`<span class="merr">· ${escapeHtml(m.error||'unreachable')}</span>`}
+                  ${m.paused?'<span class="mpaused">⏸ paused</span>':''}
+                  ${(m.reachable||m.paused)?'':`<span class="merr">· ${escapeHtml(m.error||'unreachable')}</span>`}
+                  ${tgl}
                 </div>`;
               if(!g.bits.length){
-                html += `<div class="empty">${m.reachable?'no active sessions':'—'}</div></div>`;
+                html += `<div class="empty">${m.paused?'tunnel paused':(m.reachable?'no active sessions':'—')}</div></div>`;
                 continue;
               }
               html += '<div class="grid">' + g.bits.map(cardHTML).join('') + '</div></div>';
@@ -1752,6 +1874,20 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
               e.stopPropagation();
               if(justDragged) return;  // swallowed click (drag / outside-commit)
               sendFocus(btn.closest('.scard'));
+            });
+          });
+          // Tunnel on/off chips on remote machine headers.
+          document.querySelectorAll('.machine-head .tglbtn').forEach(btn=>{
+            btn.addEventListener('click', async e=>{
+              e.stopPropagation();
+              const enable = btn.dataset.on !== '1';
+              btn.disabled = true;
+              try {
+                await fetch('/api/tunnel', {method:'POST',
+                  headers:{'Content-Type':'application/json'},
+                  body: JSON.stringify({name: btn.dataset.host, enabled: enable})});
+              } catch(err){}
+              cockpitTick();   // re-render with the new paused state now
             });
           });
           // ✕ soft-dismisses the session from its collector; if the session is
@@ -1902,6 +2038,13 @@ class Handler(BaseHTTPRequestHandler):
             data = json.loads(body or "{}")
             self._send_response(json.dumps(dismiss_session(data.get("sid", ""))),
                                 "application/json")
+
+        elif self.path == "/api/tunnel":
+            data = json.loads(body or "{}")
+            self._send_response(
+                json.dumps(set_tunnel_enabled(data.get("name", ""),
+                                              bool(data.get("enabled", True)))),
+                "application/json")
 
         else:
             self._send_response("Not Found", status=404)
