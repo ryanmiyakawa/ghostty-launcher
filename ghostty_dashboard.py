@@ -1225,12 +1225,14 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         .scard.editing .pname { cursor:text; background:rgba(255,255,255,0.09);
                                 box-shadow:0 0 0 1px rgba(148,163,184,.4); }
         /* Session hash — right-aligned in the header band, WHITE like the
-           title (same color + shadow), kept a touch smaller and monospace. */
+           title (same color + shadow), kept a touch smaller and monospace.
+           margin-left:auto floats it right (the pill no longer lives here). */
         .scard .idtag { font-size:.7rem; color:#fff; text-shadow:0 1px 2px rgba(0,0,0,0.6);
-                        font-family:ui-monospace,Menlo,monospace; margin-left:.3rem; }
-        /* Which machine this session lives on — readable chip beside the id
-           tag. Mac stays dim/neutral; each remote wears its own stable hue
-           (inline hsl from machineHue), matching its strip entry. */
+                        font-family:ui-monospace,Menlo,monospace; margin-left:auto; }
+        /* Which machine this session lives on — readable chip at the card's
+           bottom-right, sharing the footer row with the cwd. Mac stays
+           dim/neutral; each remote wears its own stable hue (inline hsl from
+           machineHue), matching its strip entry. */
         .scard .mtag { font-size:.74rem; font-weight:600;
                        font-family:ui-monospace,Menlo,monospace;
                        padding:.08rem .52rem; border-radius:999px; flex:none;
@@ -1265,7 +1267,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         .scard .foot { margin-top:auto; }
         .scard .detail { font-size:.7rem; color:#64748b; overflow:hidden;
                          text-overflow:ellipsis; white-space:nowrap; }
-        .scard .cwd { margin-top:.3rem; font-size:.64rem; color:#55606c;
+        /* Footer row: cwd on the left (truncates first), machine pill floated
+           right. min-width:0 lets the cwd ellipsize instead of pushing the
+           pill out of the card. */
+        .scard .footrow { display:flex; align-items:center; gap:.5rem; margin-top:.3rem; }
+        .scard .cwd { flex:1; min-width:0; font-size:.64rem; color:#55606c;
                       font-family:ui-monospace,Menlo,monospace;
                       overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
         /* State palette (border + label + dot) — saturated enough that
@@ -1906,14 +1912,17 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
           const lastp = b.lastp
             ? `<div class="lastprompt" title="your latest prompt">${escapeHtml(b.lastp)}</div>` : '';
           return `<div class="${b.cls}" draggable="true" data-sid="${escapeHtml(b.sid)}"${focusData}>
-            <div class="proj" style="${b.headStyle}"><span class="pname" contenteditable="false" spellcheck="false" data-cwd="${escapeHtml(b.cwd)}">${escapeHtml(b.name)}</span>${colorinp}${editbtn}${focusbtn}<span class="mtag ${b.mtagCls}" style="${b.mtagStyle}" title="machine: ${escapeHtml(b.mtag)}">${escapeHtml(b.mtag)}</span><span class="idtag">${escapeHtml(b.sid.slice(0,6))}</span><button class="xbtn" title="dismiss (respawns on next activity)" onclick="event.stopPropagation()">✕</button></div>
+            <div class="proj" style="${b.headStyle}"><span class="pname" contenteditable="false" spellcheck="false" data-cwd="${escapeHtml(b.cwd)}">${escapeHtml(b.name)}</span>${colorinp}${editbtn}${focusbtn}<span class="idtag">${escapeHtml(b.sid.slice(0,6))}</span><button class="xbtn" title="dismiss (respawns on next activity)" onclick="event.stopPropagation()">✕</button></div>
             <div class="st">${b.stCore}<span class="age">${escapeHtml(b.age)}</span></div>
             <div class="title" contenteditable="false" spellcheck="false" data-sid="${escapeHtml(b.sid)}">${escapeHtml(b.label)}</div>
             ${lastp}
             <div class="activity">${escapeHtml(b.activity)}</div>
             <div class="foot">
               <div class="detail" title="${escapeHtml(b.detail)}">${escapeHtml(b.detail)||'&nbsp;'}</div>
-              <div class="cwd">${escapeHtml(b.cwd)}</div>
+              <div class="footrow">
+                <div class="cwd">${escapeHtml(b.cwd)}</div>
+                <span class="mtag ${b.mtagCls}" style="${b.mtagStyle}" title="machine: ${escapeHtml(b.mtag)}">${escapeHtml(b.mtag)}</span>
+              </div>
             </div>
           </div>`;
         }
