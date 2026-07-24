@@ -25,6 +25,16 @@ local function cockpitUrlDecode(s)
     end)
 end
 
+-- Resolved HostName for an ssh alias/target (via `ssh -G`), lower-cased.
+-- Lets us match interactive ssh processes to a host by the box they actually
+-- reach rather than by a literal alias substring (aliases for the same box
+-- differ: `ap3-gateway`, the raw `user@host`, etc.). Empty on any failure.
+local function cockpitSshHostname(name)
+    if not name or name == "" then return "" end
+    local out = hs.execute("/usr/bin/ssh -G " .. name .. " 2>/dev/null") or ""
+    return (out:match("hostname%s+(%S+)") or ""):lower()
+end
+
 local function cockpitFocusTerminal(needle)
     if not needle or needle == "" then return false end
     needle = needle:lower()
@@ -100,11 +110,32 @@ end
 -- AppleScript and select that tab.
 local function cockpitFocusBySsh(target)
     if not target or target == "" then return false end
+    local wantHost = cockpitSshHostname(target)   -- box `target` actually reaches
     local out = hs.execute("ps -axo pid=,command= | grep -E '[s]sh ' 2>/dev/null") or ""
     for line in out:gmatch("[^\n]+") do
         local pid, cmd = line:match("^%s*(%d+)%s+(.*)$")
-        if pid and cmd and cmd:find("ssh", 1, true) and cmd:find(target, 1, true)
-                and not cmd:find("-N", 1, true) then      -- skip our tunnels
+        -- An interactive ssh whose target reaches the SAME box: match either by
+        -- literal substring (fast path for identical aliases) or, when that
+        -- misses, by resolving each destination-looking token with `ssh -G` and
+        -- comparing HostName. Tunnels (-N) are always excluded.
+        local matches = false
+        if pid and cmd and cmd:find("ssh", 1, true) and not cmd:find("-N", 1, true) then
+            if cmd:find(target, 1, true) then
+                matches = true
+            elseif wantHost ~= "" then
+                for tok in cmd:gmatch("%S+") do
+                    -- skip flags, the `ssh` word itself, and path/opt tokens
+                    -- (e.g. the ghostty binary path) to avoid needless resolves
+                    if tok ~= "ssh" and tok:sub(1, 1) ~= "-"
+                            and not tok:find("/", 1, true)
+                            and cockpitSshHostname(tok) == wantHost then
+                        matches = true
+                        break
+                    end
+                end
+            end
+        end
+        if matches then
             pid = tonumber(pid)
             -- Ghostty: ancestor walk to the per-window ghostty process.
             local p = pid
@@ -180,8 +211,17 @@ cockpitFocusServer:setCallback(function(method, path, headers, body)
     for k, v in query:gmatch("([^&=?]+)=([^&]*)") do
         params[k] = cockpitUrlDecode(v)
     end
+    -- Needle priority. The server may override the default order (e.g. local
+    -- sessions send order=hint,title,alt so a fresh ai-title wins over a stale
+    -- launcher title); fall back to title,alt,hint when unspecified.
+    local seq = {}
+    if params.order and params.order ~= "" then
+        for k in params.order:gmatch("[^,]+") do seq[#seq + 1] = k end
+    else
+        seq = { "title", "alt", "hint" }
+    end
     local tried, ok = {}, false
-    for _, key in ipairs({ "title", "alt", "hint" }) do
+    for _, key in ipairs(seq) do
         local needle = params[key]
         if needle and needle ~= "" and not tried[needle] then
             tried[needle] = true

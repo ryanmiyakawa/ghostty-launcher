@@ -641,10 +641,21 @@ def focus_window(title, alt="", hint="", sid="", cwd="", mach=""):
     ssh_target = _host_ssh_target(mach) if mach else ""
     if not (title or alt or hint or ssh_target):
         return {"ok": False, "error": "no title"}
+    # Candidate priority. For LOCAL sessions the freshest ai-title (hint) is the
+    # strongest needle and must be tried FIRST: an unlocked window carries that
+    # exact title so it matches its own window, while a stale/over-broad launcher
+    # title (e.g. a session cwd-joined to a broad DIRECTORY project) would
+    # otherwise shadow-match an unrelated locked window of that name. Locked
+    # windows simply miss the hint and fall through to title — strictly better.
+    # Remote sessions keep title-first (their locked host-window title), then the
+    # ssh-process discovery fallback.
+    is_local = not mach
+    order = "hint,title,alt" if is_local else "title,alt,hint"
     try:
         url = (f"http://127.0.0.1:{HS_FOCUS_PORT}/focus"
                f"?title={quote(title or '')}&alt={quote(alt or '')}"
-               f"&hint={quote(hint or '')}&ssh={quote(ssh_target or '')}")
+               f"&hint={quote(hint or '')}&ssh={quote(ssh_target or '')}"
+               f"&order={quote(order)}")
         with urllib.request.urlopen(url, timeout=3.0) as r:
             return json.loads(r.read().decode())
     except Exception as e:
