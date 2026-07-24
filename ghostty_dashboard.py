@@ -1076,7 +1076,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         .scard:hover .editbtn, .scard.editing .editbtn { opacity:1; }
         .scard .editbtn:hover { color:#cbd5e1; background:rgba(255,255,255,0.06); }
         .scard.editing .editbtn { color:#7faa8f; opacity:1; }
-        /* Focus-window button (Mac-local sessions only), same treatment as ✎. */
+        /* Focus-window button (any session with a match candidate), same
+           treatment as ✎. */
         .scard .focusbtn { background:none; border:none; color:#5b6773; cursor:pointer;
                            user-select:none; -webkit-user-select:none;
                            font-size:.82rem; line-height:1; padding:.1rem .2rem; border-radius:4px;
@@ -1643,10 +1644,17 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
           const ui = CUI[s.state] || {l:s.state, c:'stale'};
           const cwd = s.cwd || '';
           const color = s.window_color || '#888888';
+          // Remote sessions are focusable too: Claude Code's title escape
+          // sequences pass through ssh, so the LOCAL terminal window SSHed
+          // into the server shows the REMOTE session's ai-title — which is
+          // exactly the stored title_hint. Remote candidates skip the cwd
+          // basename (a remote path fragment could false-match an unrelated
+          // local window); cards with no candidate at all stay inert.
           const focusTitle = (s.launch_title || s.window_name || '').trim();
-          const cwdBase = (cwd.replace(/\/+$/,'').split('/').pop() || '').trim();
+          const cwdBase = isLocal
+            ? (cwd.replace(/\/+$/,'').split('/').pop() || '').trim() : '';
           const focusHint = (s.title_hint || '').trim();
-          const canFocus = !!((s.machine==='mac') && (focusTitle || cwdBase || focusHint));
+          const canFocus = !!(focusTitle || cwdBase || focusHint);
           const pmInfo = PMODES[s.permission_mode];
           const ctxCls = s.context_tokens>=CTX_CRIT ? ' ctx-crit'
                        : s.context_tokens>=CTX_WARN ? ' ctx-warn' : '';
@@ -1894,18 +1902,20 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         let dragEl = null;
         let justDragged = false;  // suppress the click that trails a drag-reorder
 
-        // Raise the Ghostty window for a card, using its candidate needles
-        // (stamped title, cwd basename, AI task summary) in order. sid+cwd let
-        // the server re-read the freshest AI summary from the transcript, since
-        // the hook-delivered hint goes stale on quiet sessions.
+        // Raise the terminal window for a card, using its candidate needles
+        // (stamped title, cwd basename, AI task summary) in order. For LOCAL
+        // sessions sid+cwd let the server re-read the freshest AI summary from
+        // the transcript at click time; remote transcripts live on the VPS, so
+        // remote cards rely on the stored hint (lags at most one hook event).
         function sendFocus(card){
           if(!card || !card.classList.contains('focusable')) return;
           const pname = card.querySelector('.pname');
+          const isLocal = !!card.querySelector('.mtag-local');
           fetch('/api/focus?title=' + encodeURIComponent(card.dataset.ft || '')
                 + '&alt=' + encodeURIComponent(card.dataset.fa || '')
                 + '&hint=' + encodeURIComponent(card.dataset.fh || '')
-                + '&sid=' + encodeURIComponent(card.dataset.sid || '')
-                + '&cwd=' + encodeURIComponent((pname && pname.dataset.cwd) || '')).catch(()=>{});
+                + '&sid=' + encodeURIComponent(isLocal ? (card.dataset.sid || '') : '')
+                + '&cwd=' + encodeURIComponent(isLocal ? ((pname && pname.dataset.cwd) || '') : '')).catch(()=>{});
         }
         function wireCockpitCards(){
           // Sublabel note — editable only inside edit mode; Enter/Escape ends the
@@ -1936,7 +1946,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
               enterEdit(card);
             });
           });
-          // ⤢ focuses the matching Ghostty window (Mac-local sessions only).
+          // ⤢ focuses the matching terminal window (local sessions and remote
+          // sessions viewed through a local SSH terminal alike).
           document.querySelectorAll('.scard .focusbtn').forEach(btn=>{
             btn.addEventListener('click', e=>{
               e.stopPropagation();

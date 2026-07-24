@@ -26,12 +26,15 @@ Nothing binds a public port. The only cross-machine traffic is the SSH tunnels
 the dashboard owns (the Mac initiates them, so NAT is a non-issue). A dead tunnel
 just greys out that machine's card.
 
-### Click-to-focus Ghostty windows (Mac-local)
+### Click-to-focus terminal windows
 
-Clicking a Mac-local session card — or its hover **⤢** button — raises the
-matching Ghostty window. Plain clicks on the card background only: clicks on
-inner controls, clicks while the card is in edit mode, and the click that
-trails a drag-reorder never trigger it. The plumbing:
+Clicking a session card — or its hover **⤢** button — raises the matching
+terminal window (Ghostty or iTerm2). This works for **remote sessions too**:
+Claude Code sets the terminal title via escape sequences, which pass through
+ssh, so the local window SSHed into a server shows the *remote* session's live
+task title and can be matched the same way. Plain clicks on the card
+background only: clicks on inner controls, clicks while the card is in edit
+mode, and the click that trails a drag-reorder never trigger it. The plumbing:
 
 - The **Launcher** stamps every window it opens with `--title=<project name>`
   (Ghostty's `title` config key, which also locks the title against shell/OSC
@@ -53,10 +56,17 @@ trails a drag-reorder never trigger it. The plumbing:
   (short timeout, graceful failure), so the browser never talks to Hammerspoon
   directly.
 
-Only sessions on `machine == "mac"` with any match candidate are clickable;
-remote cards do nothing. Launcher-launched windows (stamped, locked `--title`)
-match deterministically; the AI-summary hint is best-effort — it tracks Claude
-Code's live retitles, lagging at most one hook event behind.
+Any session with a match candidate is clickable; cards with none stay inert.
+Candidate differences by locality: local sessions get the launcher-stamped
+title, cwd basename, and a **click-time fresh re-read** of the ai-title from
+the local transcript; remote sessions use their stamped/override title plus
+the hook-delivered `title_hint` only (no cwd basename — a remote path fragment
+could false-match an unrelated local window — and no click-time re-read, since
+the transcript lives on the VPS). Remote focus finds the window whose title
+shows the remote session's live task title: reliable when that terminal is
+actually SSHed in and visible, backgrounded iTerm2 tabs included (AppleScript
+tab pass); staleness window is one hook event. Launcher-launched windows
+(stamped, locked `--title`) always match deterministically.
 
 ### Setup
 
