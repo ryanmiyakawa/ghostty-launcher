@@ -27,6 +27,11 @@ else
   echo "No existing service on port $PORT."
 fi
 
+# 1b. Reap any cockpit ssh tunnels the old dashboard left behind — orphans
+# hold the forward ports so the fresh instance can't bind them. (The dashboard
+# also cleans up on exit and self-heals stale binds; this is belt-and-braces.)
+pkill -f "ssh -N -T.*127\.0\.0\.1:8458" 2>/dev/null || true
+
 # 2. Start a fresh, detached instance (no browser).
 echo "Starting Ghostty launcher…"
 nohup "$LAUNCHER" --no-browser >"$LOG" 2>&1 &

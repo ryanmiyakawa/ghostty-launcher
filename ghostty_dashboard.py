@@ -4,9 +4,11 @@ Ghostty Terminal Launcher Dashboard - Web UI
 A browser-based launcher with configuration and color picker.
 """
 
+import atexit
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -46,14 +48,15 @@ def load_cockpit_ui():
     ui.setdefault("labels", {})     # session_id -> custom note label
     ui.setdefault("order", [])      # session_id[] manual ordering
     ui.setdefault("identity", {})   # directory -> {name, color} window identity override
-    ui.setdefault("tunnels", {})    # host name -> {"enabled": bool}; absent = enabled
+    ui.setdefault("tunnels", {})    # host name -> {"enabled": true}; absent = OFF
     return ui
 
 
 def tunnel_enabled(ui, name):
-    """Hosts default to enabled; only an explicit {"enabled": false} pauses."""
+    """Tunnels are OPT-IN (greenlight model): no persistent ssh to a host until
+    the user explicitly enables it. An absent entry means paused."""
     ent = (ui.get("tunnels") or {}).get(name)
-    return not (isinstance(ent, dict) and ent.get("enabled") is False)
+    return isinstance(ent, dict) and ent.get("enabled") is True
 
 
 def _is_hex_color(s):
@@ -76,12 +79,13 @@ def update_cockpit_ui(patch):
         if "order" in patch and isinstance(patch["order"], list):
             ui["order"] = [s for s in patch["order"] if isinstance(s, str)]
         if "tunnel" in patch and isinstance(patch["tunnel"], dict):
-            # Per-host tunnel on/off, persisted so a paused host stays paused
-            # across dashboard restarts. Enabled hosts carry no entry.
+            # Per-host tunnel greenlight, persisted across dashboard restarts.
+            # Opt-in: enabling writes {"enabled": true}; disabling removes the
+            # entry (absent = off, the default).
             name = (patch["tunnel"].get("name") or "").strip()[:80]
             if name:
-                if patch["tunnel"].get("enabled") is False:
-                    ui["tunnels"][name] = {"enabled": False}
+                if patch["tunnel"].get("enabled") is True:
+                    ui["tunnels"][name] = {"enabled": True}
                 else:
                     ui["tunnels"].pop(name, None)
         if "identity" in patch:
@@ -158,17 +162,26 @@ def _tunnel_loop(host):
         "-o", "ServerAliveInterval=15",
         "-o", "ServerAliveCountMax=3",
         "-o", "StrictHostKeyChecking=accept-new",
+        # Never multiplex: with a user ControlMaster auto+ControlPersist config
+        # our tunnel would daemonize as (or ride) a mux master — the child we
+        # watch exits, liveness tracking lies, and the forward outlives us as
+        # an unkillable PPID-1 orphan. Own connection, own forward, always.
+        "-o", "ControlMaster=no",
+        "-o", "ControlPath=none",
         "-L", f"127.0.0.1:{lport}:127.0.0.1:{LOCAL_COLLECTOR}",
         host["ssh"],
     ]
     backoff = 3
     while True:
+        if _shutting_down:
+            return
         if not ctl["run"].is_set():
             _set_tunnel(name, False, "")
             ctl["run"].wait()
             backoff = 3
             continue
         proc = None
+        started = time.time()
         try:
             proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL,
                                     stdout=subprocess.DEVNULL,
@@ -177,7 +190,6 @@ def _tunnel_loop(host):
             time.sleep(2)
             if proc.poll() is None:
                 _set_tunnel(name, True)
-                backoff = 3   # reset once the tunnel establishes
             # Watch the child; a pause mid-flight terminates it promptly.
             while proc.poll() is None:
                 if not ctl["run"].is_set():
@@ -193,11 +205,25 @@ def _tunnel_loop(host):
             proc.wait()
             _set_tunnel(name, False, "" if not ctl["run"].is_set()
                         else (err.strip() or "tunnel exited"))
+            # Self-heal a stale forward: an orphaned ssh (e.g. from a previous
+            # dashboard that died without cleanup) squatting on our local port
+            # makes every retry fail with "bind: Address already in use" — kill
+            # the exact stale holder before the next attempt. Our own child has
+            # already exited by this point, so the pattern can't match it.
+            if "Address already in use" in err or "bind:" in err:
+                subprocess.run(
+                    ["pkill", "-f", f"ssh -N -T.*127.0.0.1:{lport}:"],
+                    capture_output=True, timeout=5)
         except Exception as e:
             _set_tunnel(name, False, str(e))
         finally:
             ctl["proc"] = None
-        if ctl["run"].is_set():
+        # Only an attempt that clearly outlived connect+bind counts as "was
+        # established" and resets the backoff; quick failures (connect timeout,
+        # bind refusal) keep doubling so flaky hosts aren't hammered.
+        if time.time() - started > 20:
+            backoff = 3
+        if ctl["run"].is_set() and not _shutting_down:
             # Backoff, but wake early if the host gets paused meanwhile.
             slept = 0.0
             while slept < backoff and ctl["run"].is_set():
@@ -226,6 +252,31 @@ def set_tunnel_enabled(name, enabled):
     return {"ok": True, "name": name, "enabled": bool(enabled)}
 
 
+_shutting_down = False
+
+
+def _kill_tunnel_children(*_args):
+    """Shut tunnels down for good: park every worker FIRST (so none can spawn
+    a fresh ssh between our cleanup and process death — that's how orphans
+    were born), then terminate the live children."""
+    global _shutting_down
+    _shutting_down = True
+    for ctl in _tunnel_ctl.values():
+        ctl["run"].clear()
+    for ctl in _tunnel_ctl.values():
+        proc = ctl.get("proc")
+        if proc and proc.poll() is None:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+
+
+def _sigterm(_sig, _frame):
+    _kill_tunnel_children()
+    sys.exit(0)   # runs atexit handlers too (terminate twice is harmless)
+
+
 def start_cockpit_tunnels():
     ui = load_cockpit_ui()
     for host in cockpit_hosts():
@@ -237,6 +288,8 @@ def start_cockpit_tunnels():
             ev.set()
         _tunnel_ctl[name] = {"run": ev, "proc": None}
         threading.Thread(target=_tunnel_loop, args=(host,), daemon=True).start()
+    atexit.register(_kill_tunnel_children)
+    signal.signal(signal.SIGTERM, _sigterm)
 
 
 def fetch_collector(port, timeout=1.0):
@@ -932,25 +985,32 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         .machine-head .mlabel { font-family:ui-monospace,Menlo,monospace; text-transform:none;
                                 letter-spacing:0; opacity:.55; font-size:.72rem; }
         .machine-head .merr { color:#b5707c; text-transform:none; letter-spacing:0; font-size:.72rem; }
-        /* Tunnel on/off chip + paused state (deliberate, dimmed — not an error). */
-        .machine-head.mh-paused { opacity:.6; }
+        /* Tunnel on/off switch + paused state (deliberate, dimmed — not an
+           error). Tunnels are opt-in, so this switch is the primary way a
+           host comes online: always visible, clearly labelled, color-coded. */
+        .machine-head.mh-paused { opacity:.75; }
         .machine-head .mpaused { color:#8b98a5; text-transform:none; letter-spacing:0;
                                  font-size:.72rem; }
-        .machine-head .tglbtn { background:rgba(255,255,255,0.06); border:1px solid rgba(148,163,184,.3);
-                                color:#8b98a5; cursor:pointer; user-select:none; -webkit-user-select:none;
-                                font-size:.66rem; letter-spacing:.02em; text-transform:none;
-                                padding:.08rem .5rem; border-radius:999px;
-                                transition:color .12s, border-color .12s, background .12s; }
-        .machine-head .tglbtn:hover { color:#e2e8f0; border-color:rgba(148,163,184,.55);
-                                      background:rgba(255,255,255,0.10); }
-        .machine-head .tglbtn.off { color:#7fd4e0; border-color:rgba(0,225,255,.35);
-                                    background:rgba(0,225,255,.07); }
-        .machine-head .tglbtn.off:hover { color:#aef2fa; border-color:rgba(0,225,255,.6); }
-        /* auto-fit (not -fill) collapses empty trailing tracks, and the bounded
-           track max keeps cards sane on huge windows — so leftover width splits
-           evenly left/right via justify-content:center instead of piling right. */
-        .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(275px,420px));
-                gap:.85rem; justify-content:center; }
+        .machine-head .tglbtn { cursor:pointer; user-select:none; -webkit-user-select:none;
+                                font-size:.72rem; font-weight:700; letter-spacing:.04em;
+                                text-transform:uppercase;
+                                padding:.22rem .7rem; border-radius:999px;
+                                transition:color .12s, border-color .12s, background .12s,
+                                           box-shadow .12s; }
+        .machine-head .tglbtn.live { color:#8fd4a5; border:1px solid rgba(111,158,128,.6);
+                                     background:rgba(111,158,128,.14);
+                                     box-shadow:0 0 10px -4px rgba(111,158,128,.7); }
+        .machine-head .tglbtn.live:hover { color:#b9ecc8; border-color:rgba(111,158,128,.9);
+                                           background:rgba(111,158,128,.22); }
+        .machine-head .tglbtn.off { color:#94a0ac; border:1px solid rgba(148,163,184,.45);
+                                    background:rgba(255,255,255,.06); opacity:1; }
+        .machine-head .tglbtn.off:hover { color:#e2e8f0; border-color:rgba(148,163,184,.8);
+                                          background:rgba(255,255,255,.12); }
+        /* Left-aligned, wrapping grid: bounded track max keeps cards sane on
+           huge windows; sections with few cards stay flush left under their
+           header instead of floating in the middle. */
+        .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(275px,420px));
+                gap:.85rem; justify-content:start; }
         /* Desaturated full outline conveys state; no bright dots. Elevated
            surface so cards float above the cockpit background. */
         .scard { background:linear-gradient(180deg, rgba(40,34,62,.86), rgba(19,15,32,.9));
@@ -1718,11 +1778,12 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             for(const g of groups){
               const m = g.m;
               const mdot = m.paused ? '#5a6472' : (m.reachable ? '#6f9e80' : '#b06e7c');
-              // Remote machines get a tunnel on/off chip; paused is a chosen
-              // state, rendered dimmed — never as an error.
+              // Remote machines get a prominent ssh on/off switch — tunnels
+              // are opt-in, so this is the primary way a host comes online.
+              // Off is a chosen state, rendered dimmed — never as an error.
               const tgl = m.local ? '' : (m.paused
-                ? `<button class="tglbtn off" data-host="${escapeHtml(m.host||m.name)}" data-on="0" title="tunnel paused — click to reconnect">▶ connect</button>`
-                : `<button class="tglbtn" data-host="${escapeHtml(m.host||m.name)}" data-on="1" title="pause the SSH tunnel to this host">⏸ pause</button>`);
+                ? `<button class="tglbtn off" data-host="${escapeHtml(m.host||m.name)}" data-on="0" title="no ssh connection — click to connect">ssh&nbsp;⏸&nbsp;off</button>`
+                : `<button class="tglbtn live" data-host="${escapeHtml(m.host||m.name)}" data-on="1" title="ssh tunnel live — click to disconnect">ssh&nbsp;▶&nbsp;live</button>`);
               html += `<div><div class="machine-head${m.paused?' mh-paused':''}">
                   <span class="mdot" style="background:${mdot}"></span>
                   <span>${escapeHtml(m.name)}</span>
