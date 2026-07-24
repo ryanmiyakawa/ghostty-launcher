@@ -979,33 +979,33 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         .cockpit-bar .sub { font-size:.8rem; color:#94a3b8; }
         .cockpit-bar .hint { margin-right:auto; font-size:.72rem; color:#64748b; }
         .machines { display:flex; flex-direction:column; gap:1.1rem; }
-        .machine-head { display:flex; align-items:center; gap:.55rem; margin-bottom:.55rem;
-                        font-size:.8rem; text-transform:uppercase; letter-spacing:.06em; color:#94a3b8; }
-        .machine-head .mdot { width:.55rem; height:.55rem; border-radius:50%; }
-        .machine-head .mlabel { font-family:ui-monospace,Menlo,monospace; text-transform:none;
-                                letter-spacing:0; opacity:.55; font-size:.72rem; }
-        .machine-head .merr { color:#b5707c; text-transform:none; letter-spacing:0; font-size:.72rem; }
-        /* Tunnel on/off switch + paused state (deliberate, dimmed — not an
-           error). Tunnels are opt-in, so this switch is the primary way a
-           host comes online: always visible, clearly labelled, color-coded. */
-        .machine-head.mh-paused { opacity:.75; }
-        .machine-head .mpaused { color:#8b98a5; text-transform:none; letter-spacing:0;
-                                 font-size:.72rem; }
-        .machine-head .tglbtn { cursor:pointer; user-select:none; -webkit-user-select:none;
-                                font-size:.72rem; font-weight:700; letter-spacing:.04em;
-                                text-transform:uppercase;
-                                padding:.22rem .7rem; border-radius:999px;
-                                transition:color .12s, border-color .12s, background .12s,
-                                           box-shadow .12s; }
-        .machine-head .tglbtn.live { color:#8fd4a5; border:1px solid rgba(111,158,128,.6);
-                                     background:rgba(111,158,128,.14);
-                                     box-shadow:0 0 10px -4px rgba(111,158,128,.7); }
-        .machine-head .tglbtn.live:hover { color:#b9ecc8; border-color:rgba(111,158,128,.9);
-                                           background:rgba(111,158,128,.22); }
-        .machine-head .tglbtn.off { color:#94a0ac; border:1px solid rgba(148,163,184,.45);
-                                    background:rgba(255,255,255,.06); opacity:1; }
-        .machine-head .tglbtn.off:hover { color:#e2e8f0; border-color:rgba(148,163,184,.8);
-                                          background:rgba(255,255,255,.12); }
+        /* Machine strip: the single, always-visible line of machine state —
+           health dot + name (+ ssh toggle for remotes). Sessions themselves
+           all flow into one unified grid below. */
+        .mstrip { display:flex; flex-wrap:wrap; align-items:center;
+                  gap:.5rem 1.4rem; margin-bottom:1rem; min-height:1.4rem; }
+        .mstrip .ms { display:inline-flex; align-items:center; gap:.5rem;
+                      font-size:.8rem; font-weight:600; text-transform:uppercase;
+                      letter-spacing:.06em; color:#94a3b8; }
+        .mstrip .ms.ms-paused { opacity:.55; }
+        .mstrip .msdot { width:.55rem; height:.55rem; border-radius:50%; flex:none; }
+        /* Tunnel on/off switch (opt-in ssh — the primary way a host comes
+           online): always visible, clearly labelled, color-coded. */
+        .mstrip .tglbtn { cursor:pointer; user-select:none; -webkit-user-select:none;
+                          font-size:.68rem; font-weight:700; letter-spacing:.04em;
+                          text-transform:uppercase;
+                          padding:.18rem .6rem; border-radius:999px;
+                          transition:color .12s, border-color .12s, background .12s,
+                                     box-shadow .12s; }
+        .mstrip .tglbtn.live { color:#8fd4a5; border:1px solid rgba(111,158,128,.6);
+                               background:rgba(111,158,128,.14);
+                               box-shadow:0 0 10px -4px rgba(111,158,128,.7); }
+        .mstrip .tglbtn.live:hover { color:#b9ecc8; border-color:rgba(111,158,128,.9);
+                                     background:rgba(111,158,128,.22); }
+        .mstrip .tglbtn.off { color:#94a0ac; border:1px solid rgba(148,163,184,.45);
+                              background:rgba(255,255,255,.06); }
+        .mstrip .tglbtn.off:hover { color:#e2e8f0; border-color:rgba(148,163,184,.8);
+                                    background:rgba(255,255,255,.12); }
         /* Left-aligned, wrapping grid: bounded track max keeps cards sane on
            huge windows; sections with few cards stay flush left under their
            header instead of floating in the middle. */
@@ -1095,8 +1095,15 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                         margin:-.05rem -.15rem; cursor:default; }
         .scard.editing .pname { cursor:text; background:rgba(255,255,255,0.09);
                                 box-shadow:0 0 0 1px rgba(148,163,184,.4); }
-        .scard .idtag { font-size:.58rem; color:#5b6773; font-family:ui-monospace,Menlo,monospace;
-                        margin-left:auto; }
+        .scard .idtag { font-size:.58rem; color:#5b6773; font-family:ui-monospace,Menlo,monospace; }
+        /* Which machine this session lives on — subtle chip beside the id tag.
+           Mac stays dim; remotes get a cyan tint so they pop at a glance. */
+        .scard .mtag { font-size:.58rem; font-family:ui-monospace,Menlo,monospace;
+                       padding:.02rem .38rem; border-radius:999px; flex:none;
+                       margin-left:auto; }
+        .scard .mtag-local { color:#6b7684; background:rgba(255,255,255,.05); }
+        .scard .mtag-remote { color:#7fd4e0; background:rgba(0,225,255,.08);
+                              box-shadow:0 0 0 1px rgba(0,225,255,.20) inset; }
         /* Sublabel: plain text in normal mode (empty → hidden, no focus), an
            editable field only inside edit mode. */
         .scard .title { font-size:.8rem; color:#e2e8f0; opacity:.9; margin-bottom:.3rem;
@@ -1632,7 +1639,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
         // Everything a card renders, precomputed once per session per tick so
         // the full-rebuild and in-place-patch paths share identical values.
-        function cardBits(s){
+        function cardBits(s, isLocal){
           const ui = CUI[s.state] || {l:s.state, c:'stale'};
           const cwd = s.cwd || '';
           const color = s.window_color || '#888888';
@@ -1654,6 +1661,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             sid: s.session_id || '',
             cls: `scard s-${ui.c}${canFocus?' focusable':''}`,
             canFocus,
+            ord: CORDER[s.state] ?? 9,
+            mtag: s.machine || '?',
+            mtagCls: isLocal ? 'mtag-local' : 'mtag-remote',
             ft: focusTitle, fa: cwdBase, fh: focusHint,
             name: s.window_name || s.project || '?',
             cwd, color,
@@ -1728,7 +1738,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
           const lastp = b.lastp
             ? `<div class="lastprompt" title="your latest prompt">${escapeHtml(b.lastp)}</div>` : '';
           return `<div class="${b.cls}" draggable="true" data-sid="${escapeHtml(b.sid)}"${focusData}>
-            <div class="proj" style="${b.headStyle}"><span class="pname" contenteditable="false" spellcheck="false" data-cwd="${escapeHtml(b.cwd)}">${escapeHtml(b.name)}</span>${colorinp}${editbtn}${focusbtn}<span class="idtag">${escapeHtml(b.sid.slice(0,6))}</span><button class="xbtn" title="dismiss (respawns on next activity)" onclick="event.stopPropagation()">✕</button></div>
+            <div class="proj" style="${b.headStyle}"><span class="pname" contenteditable="false" spellcheck="false" data-cwd="${escapeHtml(b.cwd)}">${escapeHtml(b.name)}</span>${colorinp}${editbtn}${focusbtn}<span class="mtag ${b.mtagCls}" title="machine: ${escapeHtml(b.mtag)}">${escapeHtml(b.mtag)}</span><span class="idtag">${escapeHtml(b.sid.slice(0,6))}</span><button class="xbtn" title="dismiss (respawns on next activity)" onclick="event.stopPropagation()">✕</button></div>
             <div class="st">${b.stCore}<span class="age">${escapeHtml(b.age)}</span></div>
             <div class="title" contenteditable="false" spellcheck="false" data-sid="${escapeHtml(b.sid)}">${escapeHtml(b.label)}</div>
             ${lastp}
@@ -1747,63 +1757,60 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
           catch(e){ return; }
           const machines = data.machines || [];
           manualOrder = data.order || [];
-          let need=0, work=0, total=0;
-          const groups = [];
+          let need=0, work=0;
+          // One unified card list across all machines (paused/unreachable
+          // machines contribute nothing — their state lives in the strip).
+          const allBits = [];
           for(const m of machines){
-            const sess = (m.sessions||[]).slice().sort((a,b)=>{
-              const oa=orderIndex(a.session_id), ob=orderIndex(b.session_id);
-              return oa!==ob ? oa-ob : (CORDER[a.state]??9)-(CORDER[b.state]??9);
-            });
-            total += sess.length;
-            need += sess.filter(s=>s.state==='needs_input').length;
-            work += sess.filter(s=>s.state==='working').length;
-            groups.push({m, bits: sess.map(cardBits)});
+            for(const s of (m.sessions||[])){
+              if(s.state==='needs_input') need++;
+              if(s.state==='working') work++;
+              allBits.push(cardBits(s, !!m.local));
+            }
           }
-          // Structural fingerprint: machine roster/health + card list/order +
-          // per-card structure (focusability, has-lastprompt). While it's
-          // unchanged we patch nodes in place; a rebuild only happens when the
-          // layout itself changes.
-          const roster = JSON.stringify(groups.map(g=>[
-            g.m.name, g.m.label, g.m.reachable, g.m.error, !!g.m.paused,
-            g.bits.map(b=>[b.sid, b.canFocus, !!b.lastp])
-          ]));
+          // Manual drag order first, then state priority.
+          allBits.sort((a,b)=>{
+            const oa=orderIndex(a.sid), ob=orderIndex(b.sid);
+            return oa!==ob ? oa-ob : a.ord-b.ord;
+          });
+          const total = allBits.length;
+          // Structural fingerprint: machine strip state (health/pause/errors)
+          // + card list/order + per-card structure. While it's unchanged we
+          // patch nodes in place; a rebuild only happens when the layout (or
+          // the strip) actually changes.
+          const roster = JSON.stringify([
+            machines.map(m=>[m.name, m.label, m.reachable, m.error, !!m.paused, !!m.local]),
+            allBits.map(b=>[b.sid, b.canFocus, !!b.lastp])
+          ]);
           const container = document.getElementById('machines');
-          if(total && roster === cockpitRoster && container.querySelector('.scard')){
-            for(const g of groups) for(const b of g.bits){
+          if(roster === cockpitRoster && container.querySelector('.mstrip')){
+            for(const b of allBits){
               const card = container.querySelector(`.scard[data-sid="${b.sid}"]`);
               if(card) patchCard(card, b);
             }
           } else {
-            let html = '';
-            for(const g of groups){
-              const m = g.m;
-              const mdot = m.paused ? '#5a6472' : (m.reachable ? '#6f9e80' : '#b06e7c');
-              // Remote machines get a prominent ssh on/off switch — tunnels
-              // are opt-in, so this is the primary way a host comes online.
-              // Off is a chosen state, rendered dimmed — never as an error.
+            // Machine strip: dot + name (+ ssh toggle for remotes). Green =
+            // reachable, dim gray = paused (deliberate), red = enabled but
+            // unreachable (error in the tooltip).
+            let strip = '<div class="mstrip">';
+            for(const m of machines){
+              const dot = m.paused ? '#5a6472' : (m.reachable ? '#6f9e80' : '#b06e7c');
+              const stateTip = m.paused ? 'tunnel paused'
+                             : (m.reachable ? 'connected' : (m.error || 'unreachable'));
               const tgl = m.local ? '' : (m.paused
                 ? `<button class="tglbtn off" data-host="${escapeHtml(m.host||m.name)}" data-on="0" title="no ssh connection — click to connect">ssh&nbsp;⏸&nbsp;off</button>`
                 : `<button class="tglbtn live" data-host="${escapeHtml(m.host||m.name)}" data-on="1" title="ssh tunnel live — click to disconnect">ssh&nbsp;▶&nbsp;live</button>`);
-              html += `<div><div class="machine-head${m.paused?' mh-paused':''}">
-                  <span class="mdot" style="background:${mdot}"></span>
-                  <span>${escapeHtml(m.name)}</span>
-                  <span class="mlabel">${escapeHtml(m.label||'')}</span>
-                  ${m.paused?'<span class="mpaused">⏸ paused</span>':''}
-                  ${(m.reachable||m.paused)?'':`<span class="merr">· ${escapeHtml(m.error||'unreachable')}</span>`}
-                  ${tgl}
-                </div>`;
-              if(!g.bits.length){
-                html += `<div class="empty">${m.paused?'tunnel paused':(m.reachable?'no active sessions':'—')}</div></div>`;
-                continue;
-              }
-              html += '<div class="grid">' + g.bits.map(cardHTML).join('') + '</div></div>';
+              strip += `<span class="ms${m.paused?' ms-paused':''}" title="${escapeHtml(m.label||'')} — ${escapeHtml(stateTip)}">
+                <span class="msdot" style="background:${dot}"></span>${escapeHtml(m.name)}${tgl}</span>`;
             }
-            container.innerHTML = total ? html :
-              '<div class="none">No sessions reporting yet.<br>Start a Claude session on any wired machine.</div>';
+            strip += '</div>';
+            container.innerHTML = strip + (total
+              ? '<div class="grid">' + allBits.map(cardHTML).join('') + '</div>'
+              : '<div class="none">No sessions reporting yet.<br>Start a Claude session on any wired machine.</div>');
             wireCockpitCards();
             cockpitRoster = roster;
             appliedBits = {};
-            for(const g of groups) for(const b of g.bits) appliedBits[b.sid] = b;
+            for(const b of allBits) appliedBits[b.sid] = b;
           }
           const bits = [];
           if(need) bits.push(need+' need you');
@@ -1938,7 +1945,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             });
           });
           // Tunnel on/off chips on remote machine headers.
-          document.querySelectorAll('.machine-head .tglbtn').forEach(btn=>{
+          document.querySelectorAll('.mstrip .tglbtn').forEach(btn=>{
             btn.addEventListener('click', async e=>{
               e.stopPropagation();
               const enable = btn.dataset.on !== '1';
