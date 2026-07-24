@@ -91,6 +91,73 @@ local function cockpitFocusTerminal(needle)
     return false
 end
 
+-- Focus the terminal window that OWNS an interactive `ssh <target>` process.
+-- Deterministic join for remote sessions living in locked-title windows (the
+-- title never shows the remote ai-title, so title matching can't find them):
+-- find the ssh client, then (Ghostty: one process per window) walk its
+-- ancestry to the owning ghostty pid and focus that app's window, or
+-- (iTerm2: single process) match the ssh client's tty to a session tty via
+-- AppleScript and select that tab.
+local function cockpitFocusBySsh(target)
+    if not target or target == "" then return false end
+    local out = hs.execute("ps -axo pid=,command= | grep -E '[s]sh ' 2>/dev/null") or ""
+    for line in out:gmatch("[^\n]+") do
+        local pid, cmd = line:match("^%s*(%d+)%s+(.*)$")
+        if pid and cmd and cmd:find("ssh", 1, true) and cmd:find(target, 1, true)
+                and not cmd:find("-N", 1, true) then      -- skip our tunnels
+            pid = tonumber(pid)
+            -- Ghostty: ancestor walk to the per-window ghostty process.
+            local p = pid
+            for _ = 1, 8 do
+                local pp = tonumber((hs.execute("ps -o ppid= -p " .. p) or ""):match("%d+") or "")
+                if not pp or pp <= 1 then break end
+                local comm = (hs.execute("ps -o comm= -p " .. pp) or ""):lower()
+                if comm:find("ghostty", 1, true) then
+                    local apps = hs.application.applicationsForBundleID("com.mitchellh.ghostty") or {}
+                    for _, app in ipairs(apps) do
+                        if app:pid() == pp then
+                            local ws = app:allWindows()
+                            if #ws > 0 then
+                                ws[1]:focus()
+                                app:activate(true)
+                                return true
+                            end
+                        end
+                    end
+                end
+                p = pp
+            end
+            -- iTerm2: join by tty.
+            local tty = (hs.execute("ps -o tty= -p " .. pid) or ""):gsub("%s+", "")
+            local iterm = hs.application.applicationsForBundleID("com.googlecode.iterm2") or {}
+            if tty ~= "" and tty ~= "??" and #iterm > 0 then
+                local okAS, res = hs.osascript.applescript([[
+                    tell application "iTerm2"
+                        repeat with w in windows
+                            repeat with t in tabs of w
+                                repeat with s in sessions of t
+                                    if (tty of s) ends with "]] .. tty .. [[" then
+                                        select t
+                                        select w
+                                        activate
+                                        return "1"
+                                    end if
+                                end repeat
+                            end repeat
+                        end repeat
+                    end tell
+                    return "0"
+                ]])
+                if okAS and res == "1" then
+                    for _, a in ipairs(iterm) do a:activate(true) end
+                    return true
+                end
+            end
+        end
+    end
+    return false
+end
+
 -- NOTE: must be a GLOBAL — a `local` here is garbage-collected after the init
 -- chunk finishes, which silently kills the server a few minutes in.
 cockpitFocusServer = hs.httpserver.new(false, false)
@@ -123,6 +190,11 @@ cockpitFocusServer:setCallback(function(method, path, headers, body)
                 break
             end
         end
+    end
+    -- Last resort for remote sessions: focus the terminal window owning the
+    -- interactive `ssh <target>` process.
+    if not ok and params.ssh and params.ssh ~= "" then
+        ok = cockpitFocusBySsh(params.ssh)
     end
     return reply(ok)
 end)

@@ -373,6 +373,7 @@ def cockpit_live():
         "paused": False,
         "sessions": [enrich(s, overrides) for s in local.get("sessions", [])] if local else [],
     })
+    wtitles = host_window_titles()
     for host in cockpit_hosts():
         name = host.get("name", host["ssh"])
         paused = _tunnel_paused(name)
@@ -388,8 +389,14 @@ def cockpit_live():
         with _tstate_lock:
             ts = dict(_tunnel_state.get(name, {}))
         data = fetch_collector(host["local_port"]) if ts.get("up") else None
-        # Remote sessions get user overrides but not the Mac launcher config.
+        # Remote sessions get user overrides but not the Mac launcher config —
+        # except launch_title, joined by ssh target: the launcher SSH project
+        # pointing at this box names the locked local window they live in.
         sessions = [apply_identity(s, overrides) for s in data.get("sessions", [])] if data else []
+        wtitle = wtitles.get(name, "")
+        for s in sessions:
+            if wtitle and not s.get("launch_title"):
+                s["launch_title"] = wtitle
         machines.append({
             "name": data.get("machine", name) if data else name,
             "label": host["ssh"],
@@ -503,6 +510,62 @@ def launch_ghostty(directory, background, foreground="#ffffff", ssh=None, title=
 HS_FOCUS_PORT = int(os.environ.get("AGENT_HS_FOCUS_PORT", "8460"))
 
 
+_ssh_hostname_cache = {}
+
+
+def _ssh_hostpart(target):
+    return (target or "").strip().split("@", 1)[-1].split(":", 1)[0]
+
+
+def _ssh_hostname(target):
+    """Resolved HostName for an ssh target (via `ssh -G`), cached."""
+    t = (target or "").strip()
+    if not t:
+        return ""
+    if t not in _ssh_hostname_cache:
+        host = _ssh_hostpart(t)
+        try:
+            out = subprocess.run(["ssh", "-G", host], capture_output=True,
+                                 text=True, timeout=5).stdout
+            for line in out.splitlines():
+                if line.startswith("hostname "):
+                    host = line.split(None, 1)[1].strip()
+                    break
+        except Exception:
+            pass
+        _ssh_hostname_cache[t] = host.lower()
+    return _ssh_hostname_cache[t]
+
+
+def host_window_titles():
+    """machine name -> locked local window title, joined by ssh target: a
+    launcher SSH project whose ssh points at the same box as the host entry.
+    That project's name IS the window's locked --title, so remote cards can
+    focus deterministically. Exact alias match first, then user@host host
+    part, then the ~/.ssh/config-resolved HostName."""
+    out = {}
+    projects = [p for p in load_config() if (p.get("ssh") or "").strip()]
+    for h in cockpit_hosts():
+        name = h.get("name", h["ssh"])
+        target = (h.get("ssh") or "").strip()
+        for p in projects:
+            ps = p["ssh"].strip()
+            if (ps == target
+                    or _ssh_hostpart(ps).lower() == _ssh_hostpart(target).lower()
+                    or (_ssh_hostname(ps) and _ssh_hostname(ps) == _ssh_hostname(target))):
+                if p.get("name"):
+                    out[name] = p["name"]
+                break
+    return out
+
+
+def _host_ssh_target(mach):
+    for h in cockpit_hosts():
+        if h.get("name", h["ssh"]) == mach:
+            return (h.get("ssh") or "").strip()
+    return ""
+
+
 def transcript_hint(cwd, sid):
     """Freshest AI task summary for a session, read straight from its Claude
     Code transcript (~/.claude/projects/<munged-cwd>/<sid>.jsonl). Claude Code
@@ -563,22 +626,26 @@ def dismiss_session(sid):
     return {"ok": ok}
 
 
-def focus_window(title, alt="", hint="", sid="", cwd=""):
-    """Ask Hammerspoon to focus the Ghostty window matching one of the needles,
-    tried in order: `title` (launcher-stamped --title), `alt` (cwd basename),
-    `hint` (Claude Code's AI task summary — its live window-retitle text, for
-    windows not launched from the Launcher). When sid+cwd are given, the hint
-    is re-read fresh from the session transcript at focus time, since the
-    hook-delivered hint goes stale on quiet sessions. Always returns JSON; a
-    missing/broken Hammerspoon → {ok: false}."""
+def focus_window(title, alt="", hint="", sid="", cwd="", mach=""):
+    """Ask Hammerspoon to focus the terminal window matching one of the
+    needles, tried in order: `title` (launcher-stamped --title), `alt` (cwd
+    basename), `hint` (Claude Code's AI task summary — its live window-retitle
+    text). When sid+cwd are given (local sessions), the hint is re-read fresh
+    from the transcript at focus time. For remote sessions `mach` resolves to
+    the host's ssh target and rides along as a last-resort needle: Hammerspoon
+    finds the interactive `ssh <target>` process and focuses the terminal
+    window that owns it — deterministic even when a locked window title hides
+    the session's ai-title. Always returns JSON; broken HS → {ok: false}."""
     fresh = transcript_hint(cwd, sid)
     hint = fresh or hint
-    if not (title or alt or hint):
+    ssh_target = _host_ssh_target(mach) if mach else ""
+    if not (title or alt or hint or ssh_target):
         return {"ok": False, "error": "no title"}
     try:
         url = (f"http://127.0.0.1:{HS_FOCUS_PORT}/focus"
-               f"?title={quote(title or '')}&alt={quote(alt or '')}&hint={quote(hint or '')}")
-        with urllib.request.urlopen(url, timeout=1.0) as r:
+               f"?title={quote(title or '')}&alt={quote(alt or '')}"
+               f"&hint={quote(hint or '')}&ssh={quote(ssh_target or '')}")
+        with urllib.request.urlopen(url, timeout=3.0) as r:
             return json.loads(r.read().decode())
     except Exception as e:
         return {"ok": False, "error": str(e)}
@@ -978,6 +1045,15 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                        gap:.75rem; margin-bottom:1rem; min-height:1.2rem; }
         .cockpit-bar .sub { font-size:.8rem; color:#94a3b8; }
         .cockpit-bar .hint { margin-right:auto; font-size:.72rem; color:#64748b; }
+        /* Bulk "close stale" chip — visible only when stale cards exist. */
+        .cockpit-bar .close-stale { cursor:pointer; user-select:none; -webkit-user-select:none;
+                                    font-size:.7rem; font-weight:600; letter-spacing:.02em;
+                                    color:#8b98a5; background:rgba(255,255,255,.06);
+                                    border:1px solid rgba(148,163,184,.35);
+                                    padding:.16rem .6rem; border-radius:999px;
+                                    transition:color .12s, border-color .12s, background .12s; }
+        .cockpit-bar .close-stale:hover { color:#ff8aa2; border-color:rgba(255,92,122,.55);
+                                          background:rgba(255,92,122,.10); }
         .machines { display:flex; flex-direction:column; gap:1.1rem; }
         /* Machine strip: the single, always-visible line of machine state —
            health dot + name (+ ssh toggle for remotes). Sessions themselves
@@ -1097,14 +1173,15 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         .scard.editing .pname { cursor:text; background:rgba(255,255,255,0.09);
                                 box-shadow:0 0 0 1px rgba(148,163,184,.4); }
         .scard .idtag { font-size:.58rem; color:#5b6773; font-family:ui-monospace,Menlo,monospace; }
-        /* Which machine this session lives on — subtle chip beside the id tag.
-           Mac stays dim; remotes get a cyan tint so they pop at a glance. */
-        .scard .mtag { font-size:.58rem; font-family:ui-monospace,Menlo,monospace;
-                       padding:.02rem .38rem; border-radius:999px; flex:none;
+        /* Which machine this session lives on — readable chip beside the id
+           tag. Mac stays dim/neutral; each remote wears its own stable hue
+           (inline hsl from machineHue), matching its strip entry. */
+        .scard .mtag { font-size:.74rem; font-weight:600;
+                       font-family:ui-monospace,Menlo,monospace;
+                       padding:.08rem .52rem; border-radius:999px; flex:none;
                        margin-left:auto; }
-        .scard .mtag-local { color:#6b7684; background:rgba(255,255,255,.05); }
-        .scard .mtag-remote { color:#7fd4e0; background:rgba(0,225,255,.08);
-                              box-shadow:0 0 0 1px rgba(0,225,255,.20) inset; }
+        .scard .mtag-local { color:#6b7684; background:rgba(255,255,255,.05);
+                             box-shadow:0 0 0 1px rgba(255,255,255,.08) inset; }
         /* Sublabel: plain text in normal mode (empty → hidden, no focus), an
            editable field only inside edit mode. */
         .scard .title { font-size:.8rem; color:#e2e8f0; opacity:.9; margin-bottom:.3rem;
@@ -1136,27 +1213,29 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         .scard .cwd { margin-top:.3rem; font-size:.64rem; color:#55606c;
                       font-family:ui-monospace,Menlo,monospace;
                       overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-        /* Desaturated state palette (border + label + dot). */
-        .scard.s-need    { border-color:rgba(176,110,124,.85); }
-        .scard.s-need    .state, .scard.s-need .sdot { color:#c08794; }
-        .scard.s-need    .sdot { background:#b06e7c; }
-        .scard.s-working { border-color:rgba(108,150,124,.85); }
-        .scard.s-working .state { color:#7faa8f; }
-        .scard.s-working .sdot { background:#6f9e80; }
-        .scard.s-done    { border-color:rgba(108,138,168,.85); }
-        .scard.s-done    .state { color:#87a2bd; }
-        .scard.s-done    .sdot { background:#7291ab; }
-        .scard.s-starting{ border-color:rgba(138,124,168,.85); }
-        .scard.s-starting .state { color:#a294c0; }
-        .scard.s-starting .sdot { background:#8a7ca8; }
-        .scard.s-stale   { border-color:rgba(90,100,114,.7); opacity:.55; }
+        /* State palette (border + label + dot) — saturated enough that
+           red / green / blue / gray read instantly apart on the dark theme:
+           neon-leaning but still inside the synthwave look. */
+        .scard.s-need    { border-color:rgba(255,92,122,.95); }
+        .scard.s-need    .state { color:#ff8aa2; }
+        .scard.s-need    .sdot { background:#ff5c7a; }
+        .scard.s-working { border-color:rgba(62,222,138,.95); }
+        .scard.s-working .state { color:#5df0a6; }
+        .scard.s-working .sdot { background:#3ede8a; }
+        .scard.s-done    { border-color:rgba(84,148,255,.95); }
+        .scard.s-done    .state { color:#84b2ff; }
+        .scard.s-done    .sdot { background:#5494ff; }
+        .scard.s-starting{ border-color:rgba(176,122,255,.95); }
+        .scard.s-starting .state { color:#c4a0ff; }
+        .scard.s-starting .sdot { background:#b07aff; }
+        .scard.s-stale   { border-color:rgba(96,106,120,.7); opacity:.55; }
         .scard.s-stale   .state { color:#7a8492; }
         .scard.s-stale   .sdot { background:#5a6472; }
-        /* Gentle, desaturated attention pulse for "needs you" only. */
+        /* Attention pulse for "needs you" only. */
         .scard.s-need { animation:sglow 2.4s ease-in-out infinite; }
-        @keyframes sglow { 0%,100%{box-shadow:0 0 0 0 rgba(176,110,124,0);}
-            50%{box-shadow:0 0 0 3px rgba(176,110,124,.18);} }
-        .work-pip { width:.55rem; height:.55rem; border-radius:50%; background:#6f9e80;
+        @keyframes sglow { 0%,100%{box-shadow:0 0 0 0 rgba(255,92,122,0);}
+            50%{box-shadow:0 0 0 3px rgba(255,92,122,.28);} }
+        .work-pip { width:.55rem; height:.55rem; border-radius:50%; background:#3ede8a;
                     flex:none; animation:sblink 1.4s ease-in-out infinite; }
         @keyframes sblink { 0%,100%{opacity:1;} 50%{opacity:.3;} }
         .machines .empty { color:#64748b; font-size:.85rem; padding:.3rem 0; }
@@ -1176,6 +1255,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         <div id="view-cockpit">
             <div class="cockpit-bar">
                 <span class="hint">Click a label to rename · drag cards to reorder</span>
+                <button class="close-stale" id="close-stale" style="display:none"
+                        title="dismiss every stale card (any live session respawns on its next activity)">✕ close stale</button>
                 <span class="sub" id="cockpit-sub"></span>
             </div>
             <div class="machines" id="machines"><div class="none">Connecting…</div></div>
@@ -1610,6 +1691,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         // red = context limit territory.
         const CTX_WARN = 150000, CTX_CRIT = 185000;
         let cockpitTimer = null;
+        let staleSids = [];     // sids of currently-stale cards (for bulk close)
         let manualOrder = [];   // session_id[] — user's drag order
         let cpBusy = false;     // editing a label or dragging → pause re-render
 
@@ -1624,6 +1706,15 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
           const n=parseInt(hex,16);
           return `rgba(${(n>>16)&255},${(n>>8)&255},${n&255},${a})`; }
         function orderIndex(sid){ const i = manualOrder.indexOf(sid); return i<0 ? 1e6 : i; }
+        // Stable distinct hue per machine name (name-hash into a fixed,
+        // well-separated palette) so tags/strip entries are recognizable at a
+        // glance. Mac (local) stays neutral/dim and never uses these.
+        const MHUES = [185, 268, 38, 322, 145, 90, 15];  // cyan violet amber magenta green lime rust
+        function machineHue(name){
+          let h = 0;
+          for(const ch of String(name||'')) h = ((h*31) + ch.charCodeAt(0)) >>> 0;
+          return MHUES[h % MHUES.length];
+        }
 
         async function saveUI(patch){
           try {
@@ -1644,17 +1735,25 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
           const ui = CUI[s.state] || {l:s.state, c:'stale'};
           const cwd = s.cwd || '';
           const color = s.window_color || '#888888';
-          // Remote sessions are focusable too: Claude Code's title escape
-          // sequences pass through ssh, so the LOCAL terminal window SSHed
-          // into the server shows the REMOTE session's ai-title — which is
-          // exactly the stored title_hint. Remote candidates skip the cwd
-          // basename (a remote path fragment could false-match an unrelated
-          // local window); cards with no candidate at all stay inert.
-          const focusTitle = (s.launch_title || s.window_name || '').trim();
+          // Remote sessions are focusable too. Candidates, in order:
+          // (1) launch_title — for remote this is the launcher SSH project
+          //     name joined server-side by ssh target, i.e. the LOCKED local
+          //     window title the sessions live in;
+          // (2) title_hint — Claude's ai-title passes through ssh, so it
+          //     matches manually-SSHed unlocked windows;
+          // (3) ssh-process discovery (server adds the host's ssh target;
+          //     Hammerspoon finds the interactive `ssh <target>` and focuses
+          //     the terminal window that owns it) — so remote cards on a
+          //     known host are always focusable.
+          // Remote candidates skip the cwd basename (a remote path fragment
+          // could false-match an unrelated local window) and the display-name
+          // override (never a real window title).
+          const focusTitle = (isLocal ? (s.launch_title || s.window_name || '')
+                                      : (s.launch_title || '')).trim();
           const cwdBase = isLocal
             ? (cwd.replace(/\/+$/,'').split('/').pop() || '').trim() : '';
           const focusHint = (s.title_hint || '').trim();
-          const canFocus = !!(focusTitle || cwdBase || focusHint);
+          const canFocus = !!(focusTitle || cwdBase || focusHint || !isLocal);
           const pmInfo = PMODES[s.permission_mode];
           const ctxCls = s.context_tokens>=CTX_CRIT ? ' ctx-crit'
                        : s.context_tokens>=CTX_WARN ? ' ctx-warn' : '';
@@ -1670,8 +1769,12 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             cls: `scard s-${ui.c}${canFocus?' focusable':''}`,
             canFocus,
             ord: CORDER[s.state] ?? 9,
+            stale: s.state === 'stale',
             mtag: s.machine || '?',
             mtagCls: isLocal ? 'mtag-local' : 'mtag-remote',
+            mtagStyle: isLocal ? '' : (h =>
+              `color:hsl(${h},70%,72%);background:hsla(${h},85%,55%,.14);` +
+              `box-shadow:0 0 0 1px hsla(${h},80%,60%,.45) inset;`)(machineHue(s.machine)),
             ft: focusTitle, fa: cwdBase, fh: focusHint,
             name: s.window_name || s.project || '?',
             cwd, color,
@@ -1742,11 +1845,12 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
           const focusbtn = b.canFocus
             ? `<button class="focusbtn" title="focus Ghostty window" onclick="event.stopPropagation()">⤢</button>` : '';
           const focusData = b.canFocus
-            ? ` data-ft="${escapeHtml(b.ft)}" data-fa="${escapeHtml(b.fa)}" data-fh="${escapeHtml(b.fh)}"` : '';
+            ? ` data-ft="${escapeHtml(b.ft)}" data-fa="${escapeHtml(b.fa)}" data-fh="${escapeHtml(b.fh)}"`
+              + (b.mtagCls === 'mtag-remote' ? ` data-fm="${escapeHtml(b.mtag)}"` : '') : '';
           const lastp = b.lastp
             ? `<div class="lastprompt" title="your latest prompt">${escapeHtml(b.lastp)}</div>` : '';
           return `<div class="${b.cls}" draggable="true" data-sid="${escapeHtml(b.sid)}"${focusData}>
-            <div class="proj" style="${b.headStyle}"><span class="pname" contenteditable="false" spellcheck="false" data-cwd="${escapeHtml(b.cwd)}">${escapeHtml(b.name)}</span>${colorinp}${editbtn}${focusbtn}<span class="mtag ${b.mtagCls}" title="machine: ${escapeHtml(b.mtag)}">${escapeHtml(b.mtag)}</span><span class="idtag">${escapeHtml(b.sid.slice(0,6))}</span><button class="xbtn" title="dismiss (respawns on next activity)" onclick="event.stopPropagation()">✕</button></div>
+            <div class="proj" style="${b.headStyle}"><span class="pname" contenteditable="false" spellcheck="false" data-cwd="${escapeHtml(b.cwd)}">${escapeHtml(b.name)}</span>${colorinp}${editbtn}${focusbtn}<span class="mtag ${b.mtagCls}" style="${b.mtagStyle}" title="machine: ${escapeHtml(b.mtag)}">${escapeHtml(b.mtag)}</span><span class="idtag">${escapeHtml(b.sid.slice(0,6))}</span><button class="xbtn" title="dismiss (respawns on next activity)" onclick="event.stopPropagation()">✕</button></div>
             <div class="st">${b.stCore}<span class="age">${escapeHtml(b.age)}</span></div>
             <div class="title" contenteditable="false" spellcheck="false" data-sid="${escapeHtml(b.sid)}">${escapeHtml(b.label)}</div>
             ${lastp}
@@ -1782,6 +1886,13 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             return oa!==ob ? oa-ob : a.ord-b.ord;
           });
           const total = allBits.length;
+          // Bulk "close stale" chip — shown only when stale cards exist.
+          staleSids = allBits.filter(b=>b.stale).map(b=>b.sid);
+          const csBtn = document.getElementById('close-stale');
+          if(csBtn){
+            csBtn.style.display = staleSids.length ? '' : 'none';
+            csBtn.textContent = `✕ close stale (${staleSids.length})`;
+          }
           // Structural fingerprint: machine strip state (health/pause/errors)
           // + card list/order + per-card structure. While it's unchanged we
           // patch nodes in place; a rebuild only happens when the layout (or
@@ -1808,8 +1919,12 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
               const tgl = m.local ? '' : (m.paused
                 ? `<button class="tglbtn off" data-host="${escapeHtml(m.host||m.name)}" data-on="0" title="no ssh connection — click to connect">ssh&nbsp;⏸&nbsp;off</button>`
                 : `<button class="tglbtn live" data-host="${escapeHtml(m.host||m.name)}" data-on="1" title="ssh tunnel live — click to disconnect">ssh&nbsp;▶&nbsp;live</button>`);
+              // Name wears the machine's stable hue (same one as its card
+              // tags) so the mapping is learnable; the dot keeps health.
+              const nameStyle = m.local ? '' :
+                ` style="color:hsl(${machineHue(m.name)},65%,70%)"`;
               strip += `<span class="ms${m.paused?' ms-paused':''}" title="${escapeHtml(m.label||'')} — ${escapeHtml(stateTip)}">
-                <span class="msdot" style="background:${dot}"></span>${escapeHtml(m.name)}${tgl}</span>`;
+                <span class="msdot" style="background:${dot}"></span><span class="msname"${nameStyle}>${escapeHtml(m.name)}</span>${tgl}</span>`;
             }
             strip += '</div>';
             container.innerHTML = strip + (total
@@ -1915,7 +2030,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 + '&alt=' + encodeURIComponent(card.dataset.fa || '')
                 + '&hint=' + encodeURIComponent(card.dataset.fh || '')
                 + '&sid=' + encodeURIComponent(isLocal ? (card.dataset.sid || '') : '')
-                + '&cwd=' + encodeURIComponent(isLocal ? ((pname && pname.dataset.cwd) || '') : '')).catch(()=>{});
+                + '&cwd=' + encodeURIComponent(isLocal ? ((pname && pname.dataset.cwd) || '') : '')
+                + '&mach=' + encodeURIComponent(!isLocal ? (card.dataset.fm || '') : '')).catch(()=>{});
         }
         function wireCockpitCards(){
           // Sublabel note — editable only inside edit mode; Enter/Escape ends the
@@ -2040,6 +2156,18 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
           if(!cockpitTimer){ cockpitTick(); cockpitTimer = setInterval(cockpitTick, 1500); }
         }
 
+        // Bulk-dismiss every stale card (same soft semantics as ✕: live
+        // sessions respawn on their next hook event).
+        document.getElementById('close-stale').addEventListener('click', async ()=>{
+          if(!staleSids.length) return;
+          try {
+            await fetch('/api/dismiss', {method:'POST',
+              headers:{'Content-Type':'application/json'},
+              body: JSON.stringify({sids: staleSids})});
+          } catch(e){}
+          cockpitTick();   // cards vanish at once, no waiting for the poll
+        });
+
         // Cockpit is the default view; launcher data preloads in the background.
         renderCards();
         loadProjects();
@@ -2080,7 +2208,8 @@ class Handler(BaseHTTPRequestHandler):
                                                         q.get("alt", [""])[0],
                                                         q.get("hint", [""])[0],
                                                         q.get("sid", [""])[0],
-                                                        q.get("cwd", [""])[0])),
+                                                        q.get("cwd", [""])[0],
+                                                        q.get("mach", [""])[0])),
                                 "application/json")
         elif self.path.startswith("/api/history"):
             q = parse_qs(urlparse(self.path).query)
@@ -2114,8 +2243,16 @@ class Handler(BaseHTTPRequestHandler):
             self._send_response(json.dumps(ui), "application/json")
 
         elif self.path == "/api/dismiss":
+            # Accepts {sid} for one session or {sids: [...]} for a bulk
+            # dismiss (e.g. the "close stale" action). Same soft semantics:
+            # live sessions respawn on their next hook event.
             data = json.loads(body or "{}")
-            self._send_response(json.dumps(dismiss_session(data.get("sid", ""))),
+            sids = data.get("sids")
+            if not isinstance(sids, list):
+                sids = [data.get("sid", "")]
+            results = [dismiss_session(s) for s in sids if isinstance(s, str) and s]
+            ok = bool(results) and all(r.get("ok") for r in results)
+            self._send_response(json.dumps({"ok": ok, "count": len(results)}),
                                 "application/json")
 
         elif self.path == "/api/tunnel":

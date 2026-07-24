@@ -59,14 +59,18 @@ mode, and the click that trails a drag-reorder never trigger it. The plumbing:
 Any session with a match candidate is clickable; cards with none stay inert.
 Candidate differences by locality: local sessions get the launcher-stamped
 title, cwd basename, and a **click-time fresh re-read** of the ai-title from
-the local transcript; remote sessions use their stamped/override title plus
-the hook-delivered `title_hint` only (no cwd basename — a remote path fragment
-could false-match an unrelated local window — and no click-time re-read, since
-the transcript lives on the VPS). Remote focus finds the window whose title
-shows the remote session's live task title: reliable when that terminal is
-actually SSHed in and visible, backgrounded iTerm2 tabs included (AppleScript
-tab pass); staleness window is one hook event. Launcher-launched windows
-(stamped, locked `--title`) always match deterministically.
+the local transcript. Remote sessions try, in order: (1) the launcher SSH
+project name **joined by ssh target** — a launcher project whose `ssh` points
+at the same box as the host entry names the locked window those sessions live
+in; (2) the hook-delivered `title_hint` (Claude's ai-title passes through ssh,
+so it matches manually-SSHed *unlocked* windows — a locked `--title` hides
+it); (3) **ssh-process discovery**: Hammerspoon finds the interactive
+`ssh <target>` process and focuses the terminal window that owns it —
+Ghostty via pid ancestry (one process per window), iTerm2 via tty→session
+match — deterministic even for locked-title windows, so remote cards on a
+known host are always focusable. No cwd basename for remote (a remote path
+fragment could false-match an unrelated local window) and no click-time
+re-read (the transcript lives on the VPS; hint staleness is one hook event).
 
 ### Setup
 
