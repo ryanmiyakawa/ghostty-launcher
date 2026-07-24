@@ -1179,10 +1179,14 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
            header full-bleed, so each card wears its Ghostty identity. */
         /* No text selection in the header: dbl-click means "edit", and the
            inner controls shouldn't fight the I-beam cursor. */
+        /* Header band: a FLAT SOLID fill of the session's assigned color
+           (set inline via headStyle). White title text with a soft shadow so
+           it stays legible on any hue. */
         .scard .proj { font-size:1.02rem; font-weight:650;
                        display:flex; align-items:center; gap:.42rem;
                        margin:-.85rem -1rem .5rem; padding:.5rem 1rem .45rem;
-                       border-bottom:1px solid rgba(255,255,255,0.07);
+                       border-bottom:1px solid rgba(0,0,0,0.4);
+                       color:#fff; text-shadow:0 1px 2px rgba(0,0,0,0.6);
                        user-select:none; -webkit-user-select:none; }
         .scard.editing .proj { user-select:text; -webkit-user-select:text; }
         .scard .swatch { position:relative; width:.95rem; height:.95rem; border-radius:3px;
@@ -1220,7 +1224,10 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                         margin:-.05rem -.15rem; cursor:default; }
         .scard.editing .pname { cursor:text; background:rgba(255,255,255,0.09);
                                 box-shadow:0 0 0 1px rgba(148,163,184,.4); }
-        .scard .idtag { font-size:.58rem; color:#5b6773; font-family:ui-monospace,Menlo,monospace; }
+        /* Session hash — right-aligned in the header band, WHITE like the
+           title (same color + shadow), kept a touch smaller and monospace. */
+        .scard .idtag { font-size:.7rem; color:#fff; text-shadow:0 1px 2px rgba(0,0,0,0.6);
+                        font-family:ui-monospace,Menlo,monospace; margin-left:.3rem; }
         /* Which machine this session lives on — readable chip beside the id
            tag. Mac stays dim/neutral; each remote wears its own stable hue
            (inline hsl from machineHue), matching its strip entry. */
@@ -1288,47 +1295,6 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         @keyframes sblink { 0%,100%{opacity:1;} 50%{opacity:.3;} }
         .machines .empty { color:#64748b; font-size:.85rem; padding:.3rem 0; }
         .machines .none { color:#64748b; text-align:center; padding:4rem 1rem; }
-
-        /* ---- Alternate card color treatments (?cardstyle=a|b) ----------
-           Each card carries --wc (session/window color) and --mh (machine
-           hue number) as inline custom props, so these variants restyle
-           purely in CSS without touching the diff-patched renderer. The two
-           extra bars (.mspine top, .mserver bottom) live in every card's
-           markup but stay hidden unless their variant class is on <body>. */
-        .scard .mspine, .scard .mserver { display:none; }
-        .scard .mspine, .scard .mserver {
-            font-family:ui-monospace,Menlo,monospace; font-weight:700;
-            font-size:.72rem; letter-spacing:.04em; align-items:center; }
-
-        /* Variant A — flat solid session band + bottom server strip. */
-        body.csA .scard .proj {
-            background:var(--wc) !important;
-            border-bottom:1px solid rgba(0,0,0,.4);
-            color:#fff; text-shadow:0 1px 2px rgba(0,0,0,.6); }
-        body.csA .scard .mtag { display:none; }
-        body.csA .scard .mserver {
-            display:flex; justify-content:flex-start; gap:.4rem;
-            margin:.7rem -1rem -.9rem; padding:.42rem 1rem;
-            color:hsl(var(--mh),82%,75%);
-            background:hsl(var(--mh),55%,13%);
-            border-top:1px solid hsla(var(--mh),70%,55%,.5); }
-
-        /* Variant B — machine-tinted card body + top spine name; the session
-           color shrinks to a thin colored underline beneath the title. */
-        body.csB .scard {
-            background:linear-gradient(180deg,
-                hsl(var(--mh),42%,13%), hsl(var(--mh),44%,9%)); }
-        body.csB .scard .mspine {
-            display:flex; justify-content:flex-start; gap:.4rem;
-            margin:-.85rem -1rem 0; padding:.36rem 1rem;
-            color:hsl(var(--mh),88%,77%);
-            background:hsl(var(--mh),55%,16%);
-            border-bottom:1px solid hsla(var(--mh),72%,55%,.55); }
-        body.csB .scard .proj {
-            background:transparent !important;
-            margin:.45rem -1rem .5rem;
-            border-bottom:2px solid var(--wc); }
-        body.csB .scard .mtag { display:none; }
     </style>
 </head>
 <body>
@@ -1867,10 +1833,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             ft: focusTitle, fa: cwdBase, fh: focusHint,
             name: s.window_name || s.project || '?',
             cwd, color,
-            // Per-card custom props consumed only by the ?cardstyle=a|b
-            // variants (session color + machine hue); inert in the default.
-            cardStyle: `--wc:${color};--mh:${machineHue(s.machine)};`,
-            headStyle: `background:linear-gradient(100deg, ${hexA(color,.42)} 0%, ${hexA(color,.14)} 55%, ${hexA(color,.02)} 100%);`,
+            // Header band: flat solid fill of the session's assigned color.
+            headStyle: `background:${color};`,
             stCore,
             age: agoSec(s.age),
             label: s.custom_title || s.title || '',
@@ -1941,8 +1905,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
               + (b.mtagCls === 'mtag-remote' ? ` data-fm="${escapeHtml(b.mtag)}"` : '') : '';
           const lastp = b.lastp
             ? `<div class="lastprompt" title="your latest prompt">${escapeHtml(b.lastp)}</div>` : '';
-          return `<div class="${b.cls}" draggable="true" data-sid="${escapeHtml(b.sid)}" style="${b.cardStyle}"${focusData}>
-            <div class="mspine">▸ ${escapeHtml(b.mtag)}</div>
+          return `<div class="${b.cls}" draggable="true" data-sid="${escapeHtml(b.sid)}"${focusData}>
             <div class="proj" style="${b.headStyle}"><span class="pname" contenteditable="false" spellcheck="false" data-cwd="${escapeHtml(b.cwd)}">${escapeHtml(b.name)}</span>${colorinp}${editbtn}${focusbtn}<span class="mtag ${b.mtagCls}" style="${b.mtagStyle}" title="machine: ${escapeHtml(b.mtag)}">${escapeHtml(b.mtag)}</span><span class="idtag">${escapeHtml(b.sid.slice(0,6))}</span><button class="xbtn" title="dismiss (respawns on next activity)" onclick="event.stopPropagation()">✕</button></div>
             <div class="st">${b.stCore}<span class="age">${escapeHtml(b.age)}</span></div>
             <div class="title" contenteditable="false" spellcheck="false" data-sid="${escapeHtml(b.sid)}">${escapeHtml(b.label)}</div>
@@ -1952,7 +1915,6 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
               <div class="detail" title="${escapeHtml(b.detail)}">${escapeHtml(b.detail)||'&nbsp;'}</div>
               <div class="cwd">${escapeHtml(b.cwd)}</div>
             </div>
-            <div class="mserver">▸ ${escapeHtml(b.mtag)}</div>
           </div>`;
         }
 
@@ -2216,8 +2178,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
           document.querySelectorAll('.scard .swatchpick').forEach(inp=>{
             inp.addEventListener('input', ()=>{
               const v = inp.value, proj = inp.closest('.proj');
-              // Window color lives only in the header band now (no left spine).
-              if(proj) proj.style.background = `linear-gradient(100deg, ${hexA(v,.42)} 0%, ${hexA(v,.14)} 55%, ${hexA(v,.02)} 100%)`;
+              // Header band is a flat solid fill of the session color; live-
+              // preview it directly so the picker updates the band immediately.
+              // Commit persists via saveUI (change) and later diff-patch polls
+              // reapply the same solid fill from headStyle (background:<color>).
+              if(proj) proj.style.background = v;
             });
             inp.addEventListener('change', ()=>{ saveUI({identity: true, cwd: inp.dataset.cwd, color: inp.value}); });
           });
@@ -2262,16 +2227,6 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
           cockpitTick();   // cards vanish at once, no waiting for the poll
         });
 
-        // Card color treatment toggle: ?cardstyle=a|b stamps a class on the
-        // static <body> ancestor once at load. No param = the default look,
-        // unchanged. Placing it on a never-repainted ancestor keeps the
-        // diff-patched card renderer (cardBits/cardHTML/patchCard) untouched.
-        (function(){
-          const cs = (new URLSearchParams(location.search).get('cardstyle')||'').toLowerCase();
-          if(cs==='a') document.body.classList.add('csA');
-          else if(cs==='b') document.body.classList.add('csB');
-        })();
-
         // Cockpit is the default view; launcher data preloads in the background.
         renderCards();
         loadProjects();
@@ -2314,7 +2269,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_GET(self):
-        # Bare path without query string, so "/?cardstyle=a" still serves root.
+        # Bare path without query string, so "/?anything" still serves root.
         route = urlparse(self.path).path
         if route == "/" or route == "/index.html":
             self._send_response(HTML_TEMPLATE)
