@@ -21,6 +21,32 @@ from urllib.parse import parse_qs, quote, urlparse
 CONFIG_PATH = os.path.expanduser("~/.claude/ghostty_dashboard_config.json")
 PORT = 8457
 
+# Static assets (PWA icons) live next to this script in the repo. realpath()
+# resolves the ~/.claude symlink back to the checkout so the icons are found
+# regardless of how the launcher is invoked.
+ASSETS_DIR = os.path.join(os.path.dirname(os.path.realpath(__file__)), "assets")
+
+# Web app manifest — makes the dashboard installable as a standalone macOS
+# app (Chrome "Install" / Safari "Add to Dock"). background_color matches the
+# page's near-black base; theme_color is the synthwave cyan accent.
+WEB_MANIFEST = {
+    "name": "Agent Cockpit",
+    "short_name": "Cockpit",
+    "description": "Live multi-session Claude agent status cockpit.",
+    "start_url": "/",
+    "scope": "/",
+    "display": "standalone",
+    "background_color": "#06040c",
+    "theme_color": "#00e1ff",
+    "icons": [
+        {"src": "/icon-192.png", "sizes": "192x192", "type": "image/png",
+         "purpose": "any"},
+        {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png",
+         "purpose": "any"},
+        {"src": "/apple-touch-icon.png", "sizes": "180x180", "type": "image/png"},
+    ],
+}
+
 STATUS_REPO = os.path.expanduser("~/project-status")
 STATUS_JSON = os.path.join(STATUS_REPO, "status.json")
 
@@ -668,6 +694,17 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Ghostty Launcher</title>
+    <!-- PWA / installable-app metadata (Agent Cockpit) -->
+    <link rel="manifest" href="/manifest.webmanifest">
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+    <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png">
+    <link rel="icon" href="/favicon.ico" sizes="any">
+    <meta name="theme-color" content="#00e1ff">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Agent Cockpit">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="application-name" content="Agent Cockpit">
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -2204,9 +2241,36 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _send_asset(self, filename, content_type):
+        """Serve a static file from ASSETS_DIR (PWA icons)."""
+        path = os.path.join(ASSETS_DIR, filename)
+        try:
+            with open(path, "rb") as f:
+                data = f.read()
+        except OSError:
+            self._send_response("Not Found", status=404)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", len(data))
+        self.send_header("Cache-Control", "public, max-age=86400")
+        self.end_headers()
+        self.wfile.write(data)
+
     def do_GET(self):
         if self.path == "/" or self.path == "/index.html":
             self._send_response(HTML_TEMPLATE)
+        elif self.path == "/manifest.webmanifest":
+            self._send_response(json.dumps(WEB_MANIFEST),
+                                "application/manifest+json")
+        elif self.path == "/icon-192.png":
+            self._send_asset("icon-192.png", "image/png")
+        elif self.path == "/icon-512.png":
+            self._send_asset("icon-512.png", "image/png")
+        elif self.path == "/apple-touch-icon.png":
+            self._send_asset("apple-touch-icon.png", "image/png")
+        elif self.path == "/favicon.ico" or self.path == "/favicon.png":
+            self._send_asset("favicon.png", "image/png")
         elif self.path == "/api/projects":
             self._send_response(json.dumps(load_config()), "application/json")
         elif self.path == "/api/status":
