@@ -151,7 +151,7 @@ def read_transcript(path):
                                       + u.get("cache_read_input_tokens", 0))
         if msg.get("model"):
             info["model"] = msg["model"]
-    info["activity"] = " ".join(info["activity"].split())[:200]
+    info["activity"] = " ".join(info["activity"].split())[:280]
     return info
 
 

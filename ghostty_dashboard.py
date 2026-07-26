@@ -1301,14 +1301,18 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         .gauge .g-reset { font-size:.58rem; font-weight:600; color:#5a6b80;
                           letter-spacing:.02em; line-height:1; min-height:.72em;
                           white-space:nowrap; }
-        /* color by REMAINING fuel: green 40-100 · amber 20-40 ·
-           deep amber 10-20 · red 0-10 */
+        /* Color by REMAINING fuel, five bands:
+           100-80 neon blue · 80-40 green · 40-25 yellow · 25-10 orange · 10-0 red
+           (a value on a boundary takes the higher/better band). */
+        .gauge.g-full .g-pct { color:#7fe4ff; }
+        .gauge.g-full .g-fill { background:linear-gradient(180deg,#8becff,#1aa5e6);
+                                box-shadow:0 0 15px 1px rgba(77,216,255,.9); }
         .gauge.g-ok   .g-pct { color:#7df5a5; }
         .gauge.g-ok   .g-fill { background:linear-gradient(180deg,#6dffa4,#16a34a);
                                 box-shadow:0 0 14px 0 rgba(109,255,164,.85); }
-        .gauge.g-warn .g-pct { color:#ffcf7a; }
-        .gauge.g-warn .g-fill { background:linear-gradient(180deg,#ffd98c,#df8f2c);
-                                box-shadow:0 0 14px 0 rgba(255,207,122,.85); }
+        .gauge.g-warn .g-pct { color:#ffe45e; }
+        .gauge.g-warn .g-fill { background:linear-gradient(180deg,#ffe86b,#e0c11e);
+                                box-shadow:0 0 14px 0 rgba(255,228,94,.85); }
         .gauge.g-deep .g-pct { color:#ff9d57; }
         .gauge.g-deep .g-fill { background:linear-gradient(180deg,#ff9d57,#c25e12);
                                 box-shadow:0 0 14px 0 rgba(255,157,87,.85); }
@@ -1369,7 +1373,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         /* Left-aligned, wrapping grid: bounded track max keeps cards sane on
            huge windows; sections with few cards stay flush left under their
            header instead of floating in the middle. */
-        .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(275px,420px));
+        .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(345px,440px));
                 gap:.85rem; justify-content:start; }
         /* Desaturated full outline conveys state; no bright dots. Elevated
            surface so cards float above the cockpit background. */
@@ -2071,7 +2075,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             headStyle: `background:${color};`,
             stCore,
             age: agoSec(s.age),
-            label: s.custom_title || s.title || '',
+            // Displayed conversation title: user's manual override wins, then
+            // Claude Code's AI task summary (title_hint — refreshes on hooks),
+            // then the first-prompt fallback. AI titles are far more descriptive
+            // than an opening prompt like "reorient yourself to this repo".
+            label: s.custom_title || (s.title_hint||'').trim() || s.title || '',
             lastp: s.last_prompt || '',
             activity: s.activity || '',
             detail: s.detail || '',
@@ -2437,10 +2445,15 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         // anchored at the bottom and draining downward as quota is consumed —
         // a full bright column is untouched quota, a low bar is nearly out.
         let usageTimer = null;
-        // Severity is by REMAINING fuel: green 40-100, amber 20-40,
-        // deep amber 10-20, red 0-10.
+        // Severity by REMAINING fuel, five bands: neon blue 100-80, green 80-40,
+        // yellow 40-25, orange 25-10, red 10-0. A value exactly on a boundary
+        // takes the better (higher) band — e.g. 80 → blue, 40 → green, 25 → yellow.
         function fuelSev(rem){
-          return rem<=10 ? 'g-crit' : (rem<=20 ? 'g-deep' : (rem<=40 ? 'g-warn' : 'g-ok'));
+          return rem<10 ? 'g-crit'
+               : rem<25 ? 'g-deep'
+               : rem<40 ? 'g-warn'
+               : rem<80 ? 'g-ok'
+               : 'g-full';
         }
         // Compact local clock time, e.g. "9pm" / "9:42pm".
         function fuelClock(t){
