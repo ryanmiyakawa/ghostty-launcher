@@ -1277,68 +1277,94 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                       padding-right:1.25rem;
                       border-right:1px solid rgba(148,163,184,.2); }
         .gauge { display:flex; flex-direction:column; align-items:center;
-                 gap:.3rem; min-width:2.65rem; }
-        .gauge .g-pct { font-size:.74rem; font-weight:800; line-height:1;
+                 gap:.32rem; min-width:3.1rem; }
+        .gauge .g-pct { font-size:.88rem; font-weight:800; line-height:1;
                         font-variant-numeric:tabular-nums; letter-spacing:.01em; }
-        .gauge .g-track { position:relative; width:15px; height:56px;
-                          border-radius:5px; overflow:hidden;
+        .gauge .g-track { position:relative; width:18px; height:64px;
+                          border-radius:6px; overflow:hidden;
                           background:rgba(148,163,184,.12);
-                          box-shadow:inset 0 0 0 1px rgba(148,163,184,.16),
-                                     inset 0 2px 7px rgba(0,0,0,.55);
+                          box-shadow:inset 0 0 0 1px rgba(148,163,184,.18),
+                                     inset 0 2px 8px rgba(0,0,0,.55);
                           background-image:repeating-linear-gradient(0deg,
-                            transparent 0, transparent 12.5px,
-                            rgba(148,163,184,.15) 12.5px, rgba(148,163,184,.15) 13.5px); }
+                            transparent 0, transparent 14.5px,
+                            rgba(148,163,184,.16) 14.5px, rgba(148,163,184,.16) 15.5px); }
         .gauge .g-fill { position:absolute; left:0; right:0; bottom:0;
-                         border-radius:0 0 5px 5px;
+                         border-radius:0 0 6px 6px;
                          transition:height .55s cubic-bezier(.4,0,.2,1), background .3s; }
         .gauge .g-fill::before { content:''; position:absolute; left:0; right:0; top:0;
-                         height:2px; background:rgba(255,255,255,.55);
-                         box-shadow:0 0 6px 1px rgba(255,255,255,.35); }
-        .gauge .g-lab { font-size:.6rem; font-weight:800; letter-spacing:.1em;
+                         height:2px; background:rgba(255,255,255,.6);
+                         box-shadow:0 0 7px 1px rgba(255,255,255,.4); }
+        .gauge .g-lab { font-size:.62rem; font-weight:800; letter-spacing:.1em;
                         text-transform:uppercase; color:#8aa0b6; line-height:1;
                         white-space:nowrap; }
         .gauge .g-reset { font-size:.58rem; font-weight:600; color:#5a6b80;
-                          letter-spacing:.02em; line-height:1; min-height:.72em; }
-        /* color by REMAINING fuel: cyan plenty · amber <=30 left · red <=10 left */
-        .gauge.g-ok   .g-pct { color:#7fe6f5; }
-        .gauge.g-ok   .g-fill { background:linear-gradient(180deg,#5ef0ff,#12a9bd);
-                                box-shadow:0 0 11px -1px rgba(94,240,255,.8); }
+                          letter-spacing:.02em; line-height:1; min-height:.72em;
+                          white-space:nowrap; }
+        /* color by REMAINING fuel: green 40-100 · amber 20-40 ·
+           deep amber 10-20 · red 0-10 */
+        .gauge.g-ok   .g-pct { color:#7df5a5; }
+        .gauge.g-ok   .g-fill { background:linear-gradient(180deg,#6dffa4,#16a34a);
+                                box-shadow:0 0 14px 0 rgba(109,255,164,.85); }
         .gauge.g-warn .g-pct { color:#ffcf7a; }
         .gauge.g-warn .g-fill { background:linear-gradient(180deg,#ffd98c,#df8f2c);
-                                box-shadow:0 0 11px -1px rgba(255,207,122,.8); }
+                                box-shadow:0 0 14px 0 rgba(255,207,122,.85); }
+        .gauge.g-deep .g-pct { color:#ff9d57; }
+        .gauge.g-deep .g-fill { background:linear-gradient(180deg,#ff9d57,#c25e12);
+                                box-shadow:0 0 14px 0 rgba(255,157,87,.85); }
         .gauge.g-crit .g-pct { color:#ff8aa2; }
         .gauge.g-crit .g-fill { background:linear-gradient(180deg,#ff9fb2,#d43a54);
-                                box-shadow:0 0 12px 0 rgba(255,138,162,.85); }
+                                box-shadow:0 0 15px 1px rgba(255,138,162,.9); }
         /* faint divider before the per-model gauges */
         .gauge.g-model-first { margin-left:.35rem; padding-left:.85rem;
                                border-left:1px solid rgba(148,163,184,.16); }
         /* --- machine / ssh cluster --- */
         .mcluster { display:flex; flex-wrap:wrap; align-content:center;
-                    align-items:center; gap:.55rem 1.35rem; flex:1 1 auto;
+                    align-items:center; gap:.55rem .7rem; flex:1 1 auto;
                     min-height:1.4rem; }
-        .mcluster .ms { display:inline-flex; align-items:center; gap:.5rem;
-                        font-size:.8rem; font-weight:600; text-transform:uppercase;
-                        letter-spacing:.06em; color:#94a3b8; }
-        .mcluster .ms.ms-paused { opacity:.55; }
+        /* Each machine is one chip: health LED + hued name + (remote) a mini
+           ssh toggle switch. The chip background binds the three into a single
+           designed unit instead of loose text + a boxy pill. */
+        .mcluster .ms { display:inline-flex; align-items:center; gap:.55rem;
+                        font-size:.78rem; font-weight:600; text-transform:uppercase;
+                        letter-spacing:.06em; color:#94a3b8;
+                        padding:.34rem .8rem; border-radius:999px;
+                        background:rgba(255,255,255,.035);
+                        border:1px solid rgba(148,163,184,.15); }
+        .mcluster .ms.ms-paused { opacity:.6; }
         .mcluster .msdot { width:.55rem; height:.55rem; border-radius:50%; flex:none;
                            box-shadow:0 0 6px -1px rgba(0,0,0,.6); }
-        /* Tunnel on/off switch (opt-in ssh — the primary way a host comes
-           online): always visible, clearly labelled, color-coded. */
+        /* Tunnel on/off: a miniature toggle switch inside the chip. The knob
+           position + green glow read live-vs-off at a glance; the health LED
+           at the chip's left keeps live / paused / unreachable distinct
+           (enabled-but-unreachable = red LED with a green switch). */
         .cockpit-panel .tglbtn { cursor:pointer; user-select:none; -webkit-user-select:none;
-                          font-size:.68rem; font-weight:700; letter-spacing:.04em;
-                          text-transform:uppercase;
-                          padding:.18rem .6rem; border-radius:999px;
-                          transition:color .12s, border-color .12s, background .12s,
-                                     box-shadow .12s; }
-        .cockpit-panel .tglbtn.live { color:#8fd4a5; border:1px solid rgba(111,158,128,.6);
-                               background:rgba(111,158,128,.14);
-                               box-shadow:0 0 10px -4px rgba(111,158,128,.7); }
-        .cockpit-panel .tglbtn.live:hover { color:#b9ecc8; border-color:rgba(111,158,128,.9);
-                                     background:rgba(111,158,128,.22); }
-        .cockpit-panel .tglbtn.off { color:#94a0ac; border:1px solid rgba(148,163,184,.45);
-                              background:rgba(255,255,255,.06); }
-        .cockpit-panel .tglbtn.off:hover { color:#e2e8f0; border-color:rgba(148,163,184,.8);
-                                    background:rgba(255,255,255,.12); }
+                          appearance:none; -webkit-appearance:none; background:none;
+                          border:0; margin:0; display:inline-flex; align-items:center;
+                          gap:.35rem; padding:.1rem 0 .1rem .15rem; font:inherit; }
+        .cockpit-panel .tglbtn .tgl-ssh { font-size:.56rem; font-weight:800;
+                          letter-spacing:.12em; text-transform:uppercase; line-height:1; }
+        .cockpit-panel .tglbtn .tgl-track { position:relative; width:26px; height:14px;
+                          border-radius:999px; flex:none;
+                          transition:background .15s, border-color .15s, box-shadow .15s; }
+        .cockpit-panel .tglbtn .tgl-knob { position:absolute; top:2px; width:10px;
+                          height:10px; border-radius:50%;
+                          transition:left .18s cubic-bezier(.4,0,.2,1), background .15s; }
+        .cockpit-panel .tglbtn.live .tgl-ssh { color:#8fd4a5; }
+        .cockpit-panel .tglbtn.live .tgl-track { background:rgba(111,200,140,.22);
+                          border:1px solid rgba(111,200,140,.6);
+                          box-shadow:0 0 9px -2px rgba(111,220,150,.8),
+                                     inset 0 0 5px rgba(111,220,150,.25); }
+        .cockpit-panel .tglbtn.live .tgl-knob { left:13px; background:#8fe6a8;
+                          box-shadow:0 0 6px 0 rgba(143,230,168,.9); }
+        .cockpit-panel .tglbtn.live:hover .tgl-track { background:rgba(111,200,140,.34);
+                          border-color:rgba(150,230,175,.9); }
+        .cockpit-panel .tglbtn.off .tgl-ssh { color:#6c7a89; }
+        .cockpit-panel .tglbtn.off .tgl-track { background:rgba(148,163,184,.1);
+                          border:1px solid rgba(148,163,184,.35); }
+        .cockpit-panel .tglbtn.off .tgl-knob { left:2px; background:#7a8798; }
+        .cockpit-panel .tglbtn.off:hover .tgl-track { background:rgba(148,163,184,.22);
+                          border-color:rgba(148,163,184,.65); }
+        .cockpit-panel .tglbtn.off:hover .tgl-knob { background:#aeb9c6; }
         /* Left-aligned, wrapping grid: bounded track max keeps cards sane on
            huge windows; sections with few cards stay flush left under their
            header instead of floating in the middle. */
@@ -2200,9 +2226,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
               const dot = m.paused ? '#5a6472' : (m.reachable ? '#6f9e80' : '#b06e7c');
               const stateTip = m.paused ? 'tunnel paused'
                              : (m.reachable ? 'connected' : (m.error || 'unreachable'));
+              // Mini toggle switch: knob left/dim = off, knob right/green = on.
+              const tglInner = `<span class="tgl-ssh">ssh</span><span class="tgl-track"><span class="tgl-knob"></span></span>`;
               const tgl = m.local ? '' : (m.paused
-                ? `<button class="tglbtn off" data-host="${escapeHtml(m.host||m.name)}" data-on="0" title="no ssh connection — click to connect">ssh&nbsp;⏸&nbsp;off</button>`
-                : `<button class="tglbtn live" data-host="${escapeHtml(m.host||m.name)}" data-on="1" title="ssh tunnel live — click to disconnect">ssh&nbsp;▶&nbsp;live</button>`);
+                ? `<button class="tglbtn off" data-host="${escapeHtml(m.host||m.name)}" data-on="0" title="no ssh connection — click to connect">${tglInner}</button>`
+                : `<button class="tglbtn live" data-host="${escapeHtml(m.host||m.name)}" data-on="1" title="ssh tunnel live — click to disconnect">${tglInner}</button>`);
               // Name wears the machine's stable hue (same one as its card
               // tags) so the mapping is learnable; the dot keeps health.
               const nameStyle = m.local ? '' :
@@ -2448,18 +2476,32 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         // anchored at the bottom and draining downward as quota is consumed —
         // a full bright column is untouched quota, a low bar is nearly out.
         let usageTimer = null;
-        // Severity is by REMAINING fuel: amber at <=30% left, red at <=10%.
-        function fuelSev(rem){ return rem<=10 ? 'g-crit' : (rem<=30 ? 'g-warn' : 'g-ok'); }
+        // Severity is by REMAINING fuel: green 40-100, amber 20-40,
+        // deep amber 10-20, red 0-10.
+        function fuelSev(rem){
+          return rem<=10 ? 'g-crit' : (rem<=20 ? 'g-deep' : (rem<=40 ? 'g-warn' : 'g-ok'));
+        }
+        // Compact local clock time, e.g. "9pm" / "9:42pm".
+        function fuelClock(t){
+          const d = new Date(t);
+          let h = d.getHours(); const m = d.getMinutes();
+          const ap = h >= 12 ? 'pm' : 'am';
+          h = h % 12 || 12;
+          return h + (m ? ':' + String(m).padStart(2,'0') : '') + ap;
+        }
+        // Reset caption always includes the local time of day: within 24h it
+        // pairs the countdown with the clock ("3h · 9pm"), further out it
+        // pairs the weekday with the clock ("Sun 9pm").
         function fuelReset(iso){
           if(!iso) return '';
           const t = new Date(iso).getTime();
           if(isNaN(t)) return '';
           const diff = t - Date.now();
           if(diff <= 0) return 'now';
-          const h = Math.floor(diff/3600000), m = Math.floor((diff%3600000)/60000);
-          if(diff < 3600000) return m+'m';
-          if(diff < 86400000) return h+'h';
-          return new Date(t).toLocaleDateString([], {weekday:'short'});
+          const clock = fuelClock(t);
+          if(diff < 3600000) return Math.floor(diff/60000) + 'm · ' + clock;
+          if(diff < 86400000) return Math.floor(diff/3600000) + 'h · ' + clock;
+          return new Date(t).toLocaleDateString([], {weekday:'short'}) + ' ' + clock;
         }
         function fuelGauge(label, pctUsed, iso, extraCls){
           const used = Math.max(0, Math.min(100, Math.round(pctUsed)));
