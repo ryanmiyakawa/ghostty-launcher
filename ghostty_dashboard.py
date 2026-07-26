@@ -441,6 +441,159 @@ def cockpit_live():
     return {"machines": machines, "order": ui.get("order", [])}
 
 
+# ---- Account usage strip -----------------------------------------------------
+# Mirrors Claude Code's /usage screen: reads the user's own OAuth access token
+# from the macOS Keychain (never persisted/logged) and queries Anthropic's
+# usage endpoint. Cached & throttled so the 60s UI poll never triggers more
+# than one upstream call per USAGE_TTL, and a stale-but-valid payload is served
+# if a refresh fails. The cockpit degrades silently (available:false) on any
+# error — no token, expired token, network failure, or shape change.
+USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+USAGE_TTL = 120  # seconds between upstream refreshes
+_usage_lock = threading.Lock()
+_usage_cache = {"data": {"available": False}, "at": 0.0}
+
+
+def _keychain_oauth_token():
+    """Read the Claude Code OAuth access token from the Keychain.
+
+    Returns (token, None) on success or (None, reason). Never logs the token.
+    Falls back to ~/.claude/.credentials.json (Linux format) if present.
+    """
+    raw = ""
+    try:
+        raw = subprocess.run(
+            ["security", "find-generic-password", "-s",
+             "Claude Code-credentials", "-w"],
+            capture_output=True, text=True, timeout=4).stdout.strip()
+    except Exception:
+        raw = ""
+    if not raw:
+        try:
+            with open(os.path.expanduser("~/.claude/.credentials.json")) as f:
+                raw = f.read().strip()
+        except Exception:
+            return None, "no-credentials"
+    try:
+        oauth = json.loads(raw).get("claudeAiOauth", {})
+    except Exception:
+        return None, "bad-credentials"
+    tok = oauth.get("accessToken")
+    if not tok:
+        return None, "no-token"
+    exp = oauth.get("expiresAt")
+    if isinstance(exp, (int, float)) and exp <= time.time() * 1000:
+        return None, "expired"
+    return tok, None
+
+
+def _fetch_usage_upstream():
+    """Call the usage endpoint and normalize it. Raises on any failure."""
+    tok, reason = _keychain_oauth_token()
+    if not tok:
+        raise RuntimeError(reason or "no-token")
+    req = urllib.request.Request(USAGE_URL, headers={
+        "Authorization": f"Bearer {tok}",
+        "anthropic-beta": "oauth-2025-04-20",
+        "Content-Type": "application/json",
+        "User-Agent": "agent-cockpit/1.0",
+    })
+    with urllib.request.urlopen(req, timeout=4) as r:
+        payload = json.loads(r.read().decode())
+    return _normalize_usage(payload)
+
+
+def _pick(d, *keys):
+    for k in keys:
+        v = d.get(k)
+        if v is not None:
+            return v
+    return None
+
+
+def _normalize_usage(payload):
+    """Map the upstream usage JSON to the cockpit's slim shape.
+
+    Prefers the structured `limits[]` array (kind/group/percent/resets_at/
+    scope.model), falling back to the flat five_hour / seven_day blocks.
+    """
+    session = None
+    weekly = None
+    models = []
+    seen = set()
+    for lim in (payload.get("limits") or []):
+        if not isinstance(lim, dict):
+            continue
+        pct = lim.get("percent")
+        if pct is None:
+            continue
+        entry = {"pct": round(float(pct)),
+                 "resets_at": lim.get("resets_at")}
+        group = lim.get("group")
+        kind = lim.get("kind")
+        scope = lim.get("scope") or {}
+        model = (scope.get("model") or {}).get("display_name") if isinstance(scope, dict) else None
+        if model:
+            name = str(model)
+            if name.lower() not in seen:
+                seen.add(name.lower())
+                models.append({"name": name, "pct": entry["pct"],
+                               "resets_at": entry["resets_at"]})
+        elif group == "session" or kind == "session":
+            if session is None:
+                session = entry
+        elif kind == "weekly_all" or group == "weekly":
+            if weekly is None:
+                weekly = entry
+    # Fallbacks from the flat blocks if limits[] was absent/incomplete.
+    fh = payload.get("five_hour") or {}
+    if session is None and fh.get("utilization") is not None:
+        session = {"pct": round(float(fh["utilization"])),
+                   "resets_at": fh.get("resets_at")}
+    sd = payload.get("seven_day") or {}
+    if weekly is None and sd.get("utilization") is not None:
+        weekly = {"pct": round(float(sd["utilization"])),
+                  "resets_at": sd.get("resets_at")}
+    if session is None and weekly is None and not models:
+        raise RuntimeError("empty-usage")
+    return {
+        "available": True,
+        "session": session,
+        "weekly": weekly,
+        "models": models,
+    }
+
+
+def account_usage():
+    """Return cached usage, refreshing at most once per USAGE_TTL.
+
+    Serves the last good payload on refresh failure; returns
+    {available:false} only if there has never been a successful fetch.
+    """
+    now = time.time()
+    with _usage_lock:
+        fresh = (now - _usage_cache["at"]) < USAGE_TTL
+        if fresh:
+            return _usage_cache["data"]
+    # Refresh outside the lock so a slow upstream call can't block readers.
+    try:
+        data = _fetch_usage_upstream()
+    except Exception:
+        data = None
+    with _usage_lock:
+        if data is not None:
+            _usage_cache["data"] = data
+            _usage_cache["at"] = time.time()
+        elif _usage_cache["data"].get("available"):
+            # Keep serving the stale-but-valid payload; back off retries a bit
+            # so a persistent failure doesn't hammer the endpoint every poll.
+            _usage_cache["at"] = time.time() - (USAGE_TTL - 30)
+        else:
+            _usage_cache["data"] = {"available": False}
+            _usage_cache["at"] = time.time()
+        return _usage_cache["data"]
+
+
 def load_status():
     """Pull the project-status repo (best effort) and return the card array."""
     try:
@@ -1106,6 +1259,41 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         /* Machine strip: the single, always-visible line of machine state —
            health dot + name (+ ssh toggle for remotes). Sessions themselves
            all flow into one unified grid below. */
+        /* Account usage strip: mirrors Claude Code's /usage screen. Slim neon
+           meters at the very top of the cockpit. Independent of the roster
+           diff-renderer — updated on its own 60s poll. */
+        .usage-strip { display:flex; flex-wrap:wrap; align-items:center;
+                       gap:.55rem .9rem; margin-bottom:1rem; }
+        .usage-strip .umeter { display:inline-flex; align-items:center; gap:.5rem;
+                       padding:.28rem .7rem .28rem .6rem; border-radius:999px;
+                       background:rgba(255,255,255,.04);
+                       border:1px solid rgba(148,163,184,.18);
+                       font-size:.74rem; font-weight:600; letter-spacing:.04em; }
+        .usage-strip .ulabel { text-transform:uppercase; letter-spacing:.08em;
+                       font-size:.66rem; font-weight:700; color:#8aa0b6; }
+        .usage-strip .ubar { position:relative; width:64px; height:6px;
+                       border-radius:999px; background:rgba(148,163,184,.16);
+                       overflow:hidden; flex:none; }
+        .usage-strip .ubar > i { position:absolute; left:0; top:0; bottom:0;
+                       border-radius:999px; display:block; }
+        .usage-strip .upct { font-variant-numeric:tabular-nums; min-width:2.2em;
+                       text-align:right; }
+        .usage-strip .ureset { font-size:.66rem; color:#64748b; font-weight:500;
+                       letter-spacing:.02em; }
+        /* Severity colors: cyan normal, amber >=70, red >=90. */
+        .usage-strip .u-normal { color:#7fe6f5; }
+        .usage-strip .u-normal .ubar > i { background:linear-gradient(90deg,#00c6dd,#5ef0ff);
+                       box-shadow:0 0 8px -2px rgba(94,240,255,.8); }
+        .usage-strip .u-warn { color:#ffcf7a; }
+        .usage-strip .u-warn .ubar > i { background:linear-gradient(90deg,#e8a13a,#ffcf7a);
+                       box-shadow:0 0 8px -2px rgba(255,207,122,.8); }
+        .usage-strip .u-crit { color:#ff8aa2; }
+        .usage-strip .u-crit .ubar > i { background:linear-gradient(90deg,#e0455e,#ff8aa2);
+                       box-shadow:0 0 8px -2px rgba(255,138,162,.85); }
+        .usage-strip .umeter.model { padding:.24rem .62rem; font-size:.72rem; }
+        .usage-strip .umeter.model .ulabel { color:inherit; opacity:.85; }
+        .usage-strip .usep { width:1px; align-self:stretch; margin:.15rem 0;
+                       background:rgba(148,163,184,.22); }
         .mstrip { display:flex; flex-wrap:wrap; align-items:center;
                   gap:.5rem 1.4rem; margin-bottom:1rem; min-height:1.4rem; }
         .mstrip .ms { display:inline-flex; align-items:center; gap:.5rem;
@@ -1320,6 +1508,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                         title="dismiss every stale card (any live session respawns on its next activity)">✕ close stale</button>
                 <span class="sub" id="cockpit-sub"></span>
             </div>
+            <div class="usage-strip" id="usage-strip" style="display:none"></div>
             <div class="machines" id="machines"><div class="none">Connecting…</div></div>
         </div>
 
@@ -2223,8 +2412,65 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
           });
         }
 
+        // ---- Account usage strip (Claude Code /usage) ----------------------
+        // Polls /api/usage every 60s, fully independent of the 1.5s roster
+        // poll and its diff-renderer. Hides itself entirely when unavailable.
+        let usageTimer = null;
+        function usageSev(pct){ return pct>=90 ? 'u-crit' : (pct>=70 ? 'u-warn' : 'u-normal'); }
+        function usageReset(iso){
+          if(!iso) return '';
+          const t = new Date(iso).getTime();
+          if(isNaN(t)) return '';
+          const diff = t - Date.now();
+          if(diff <= 0) return 'now';
+          const h = Math.floor(diff/3600000), m = Math.floor((diff%3600000)/60000);
+          if(diff < 3600000) return 'resets '+m+'m';
+          if(diff < 86400000) return 'resets '+h+'h';
+          const day = new Date(t).toLocaleDateString([], {weekday:'short'});
+          return 'resets '+escapeHtml(day);
+        }
+        function usageMeter(label, u){
+          if(!u || u.pct==null) return '';
+          const pct = Math.max(0, Math.min(100, Math.round(u.pct)));
+          const sev = usageSev(pct);
+          const reset = usageReset(u.resets_at);
+          return `<span class="umeter ${sev}">`
+            + `<span class="ulabel">${escapeHtml(label)}</span>`
+            + `<span class="ubar"><i style="width:${pct}%"></i></span>`
+            + `<span class="upct">${pct}%</span>`
+            + (reset ? `<span class="ureset">${reset}</span>` : '')
+            + `</span>`;
+        }
+        function usageModelPill(m){
+          if(!m || m.pct==null) return '';
+          const pct = Math.max(0, Math.min(100, Math.round(m.pct)));
+          const sev = usageSev(pct);
+          return `<span class="umeter model ${sev}">`
+            + `<span class="ulabel">${escapeHtml(m.name||'')}</span>`
+            + `<span class="ubar"><i style="width:${pct}%"></i></span>`
+            + `<span class="upct">${pct}%</span>`
+            + `</span>`;
+        }
+        async function usageTick(){
+          let d;
+          try { d = await (await fetch('/api/usage')).json(); }
+          catch(e){ return; }  // keep last render on transient failure
+          const el = document.getElementById('usage-strip');
+          if(!el) return;
+          if(!d || !d.available){ el.style.display='none'; el.innerHTML=''; return; }
+          let html = usageMeter('5h', d.session) + usageMeter('week', d.weekly);
+          const models = (d.models||[]).filter(m=>m && m.pct!=null);
+          if(models.length){
+            html += '<span class="usep"></span>' + models.map(usageModelPill).join('');
+          }
+          if(!html.trim()){ el.style.display='none'; el.innerHTML=''; return; }
+          el.innerHTML = html;
+          el.style.display = 'flex';
+        }
+
         function startCockpit(){
           if(!cockpitTimer){ cockpitTick(); cockpitTimer = setInterval(cockpitTick, 1500); }
+          if(!usageTimer){ usageTick(); usageTimer = setInterval(usageTick, 60000); }
         }
 
         // Bulk-dismiss every stale card (same soft semantics as ✕: live
@@ -2302,6 +2548,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send_response(json.dumps(load_status()), "application/json")
         elif self.path == "/api/live":
             self._send_response(json.dumps(cockpit_live()), "application/json")
+        elif self.path == "/api/usage":
+            self._send_response(json.dumps(account_usage()), "application/json")
         elif self.path.startswith("/api/focus"):
             q = parse_qs(urlparse(self.path).query)
             self._send_response(json.dumps(focus_window(q.get("title", [""])[0],
