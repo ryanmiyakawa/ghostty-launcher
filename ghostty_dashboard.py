@@ -868,9 +868,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             padding: 2rem;
             /* Synthwave: near-black base with magenta / violet / cyan neon pools. */
             background:
-                radial-gradient(1000px 560px at 12% -8%, rgba(255,45,149,.16), transparent 60%),
-                radial-gradient(1100px 620px at 92% -4%, rgba(130,50,235,.20), transparent 60%),
-                radial-gradient(900px 700px at 78% 112%, rgba(0,225,255,.10), transparent 58%),
+                radial-gradient(1050px 600px at 10% -6%, rgba(255,45,149,.22), transparent 60%),
+                radial-gradient(1150px 660px at 94% -2%, rgba(140,55,240,.26), transparent 60%),
+                radial-gradient(820px 640px at 16% 44%, rgba(0,225,255,.09), transparent 62%),
+                radial-gradient(860px 680px at 90% 60%, rgba(180,60,220,.11), transparent 62%),
+                radial-gradient(1000px 760px at 78% 114%, rgba(0,225,255,.13), transparent 58%),
                 linear-gradient(180deg, #06040c 0%, #0a0616 52%, #06040c 100%);
             background-attachment: fixed;
         }
@@ -1245,7 +1247,6 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         .cockpit-bar { display:flex; align-items:center; justify-content:flex-end;
                        gap:.75rem; margin-bottom:1rem; min-height:1.2rem; }
         .cockpit-bar .sub { font-size:.8rem; color:#94a3b8; }
-        .cockpit-bar .hint { margin-right:auto; font-size:.72rem; color:#64748b; }
         /* Bulk "close stale" chip — visible only when stale cards exist. */
         .cockpit-bar .close-stale { cursor:pointer; user-select:none; -webkit-user-select:none;
                                     font-size:.7rem; font-weight:600; letter-spacing:.02em;
@@ -1346,8 +1347,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         .cockpit-panel .tglbtn .tgl-track { position:relative; width:26px; height:14px;
                           border-radius:999px; flex:none;
                           transition:background .15s, border-color .15s, box-shadow .15s; }
-        .cockpit-panel .tglbtn .tgl-knob { position:absolute; top:2px; width:10px;
-                          height:10px; border-radius:50%;
+        .cockpit-panel .tglbtn .tgl-knob { position:absolute; top:50%; width:10px;
+                          height:10px; border-radius:50%; transform:translateY(-50%);
                           transition:left .18s cubic-bezier(.4,0,.2,1), background .15s; }
         .cockpit-panel .tglbtn.live .tgl-ssh { color:#8fd4a5; }
         .cockpit-panel .tglbtn.live .tgl-track { background:rgba(111,200,140,.22);
@@ -1432,28 +1433,14 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                                border:none; padding:0; background:none; }
         .scard .editonly { display:none; }
         .scard.editing .editonly { display:inline-block; }
-        .scard .editbtn { background:none; border:none; color:#5b6773; cursor:pointer;
-                          user-select:none; -webkit-user-select:none;
-                          font-size:.78rem; line-height:1; padding:.1rem .2rem; border-radius:4px;
-                          opacity:0; transition:opacity .12s, color .12s; }
-        .scard:hover .editbtn, .scard.editing .editbtn { opacity:1; }
-        .scard .editbtn:hover { color:#cbd5e1; background:rgba(255,255,255,0.06); }
-        .scard.editing .editbtn { color:#7faa8f; opacity:1; }
-        /* Focus-window button (any session with a match candidate), same
-           treatment as ✎. */
-        .scard .focusbtn { background:none; border:none; color:#5b6773; cursor:pointer;
-                           user-select:none; -webkit-user-select:none;
-                           font-size:.82rem; line-height:1; padding:.1rem .2rem; border-radius:4px;
-                           opacity:0; transition:opacity .12s, color .12s; }
-        .scard:hover .focusbtn, .scard.editing .focusbtn { opacity:1; }
-        .scard .focusbtn:hover { color:#7fd4e0; background:rgba(0,225,255,0.08); }
-        /* Dismiss button — soft-removes the card (respawns on next activity). */
-        .scard .xbtn { background:none; border:none; color:#5b6773; cursor:pointer;
-                       user-select:none; -webkit-user-select:none;
-                       font-size:.78rem; line-height:1; padding:.1rem .2rem; border-radius:4px;
-                       opacity:0; transition:opacity .12s, color .12s; }
-        .scard:hover .xbtn { opacity:1; }
-        .scard .xbtn:hover { color:#e08791; background:rgba(176,110,124,0.12); }
+        /* Dismiss button — soft-removes the card (respawns on next activity).
+           Always visible with a dim translucent-white resting state (it sits on
+           the solid colored header band); brightens + reddens on hover. */
+        .scard .xbtn { background:rgba(0,0,0,0.18); border:none; color:rgba(255,255,255,0.62);
+                       cursor:pointer; user-select:none; -webkit-user-select:none;
+                       font-size:.92rem; line-height:1; padding:.15rem .34rem; border-radius:5px;
+                       opacity:1; transition:color .12s, background .12s; }
+        .scard .xbtn:hover { color:#fff; background:rgba(224,90,110,0.55); }
         .scard.editing .xbtn { display:none; }  /* keep it out of edit mode */
         .scard .pname { outline:none; border-radius:5px; padding:.05rem .25rem;
                         margin:-.05rem -.15rem; cursor:default; }
@@ -1550,7 +1537,6 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
         <div id="view-cockpit">
             <div class="cockpit-bar">
-                <span class="hint">Click a label to rename · drag cards to reorder</span>
                 <button class="close-stale" id="close-stale" style="display:none"
                         title="dismiss every stale card (any live session respawns on its next activity)">✕ close stale</button>
                 <span class="sub" id="cockpit-sub"></span>
@@ -2145,16 +2131,13 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
         function cardHTML(b){
           const colorinp = `<label class="swatch editonly" title="recolor" onclick="event.stopPropagation()"><input type="color" class="swatchpick" data-cwd="${escapeHtml(b.cwd)}" value="${escapeHtml(b.color)}"></label>`;
-          const editbtn = `<button class="editbtn" title="edit name & color" onclick="event.stopPropagation()">✎</button>`;
-          const focusbtn = b.canFocus
-            ? `<button class="focusbtn" title="focus Ghostty window" onclick="event.stopPropagation()">⤢</button>` : '';
           const focusData = b.canFocus
             ? ` data-ft="${escapeHtml(b.ft)}" data-fa="${escapeHtml(b.fa)}" data-fh="${escapeHtml(b.fh)}"`
               + (b.mtagCls === 'mtag-remote' ? ` data-fm="${escapeHtml(b.mtag)}"` : '') : '';
           const lastp = b.lastp
             ? `<div class="lastprompt" title="your latest prompt">${escapeHtml(b.lastp)}</div>` : '';
           return `<div class="${b.cls}" draggable="true" data-sid="${escapeHtml(b.sid)}"${focusData}>
-            <div class="proj" style="${b.headStyle}"><span class="pname" contenteditable="false" spellcheck="false" data-cwd="${escapeHtml(b.cwd)}">${escapeHtml(b.name)}</span>${colorinp}${editbtn}${focusbtn}<span class="idtag">${escapeHtml(b.sid.slice(0,6))}</span><button class="xbtn" title="dismiss (respawns on next activity)" onclick="event.stopPropagation()">✕</button></div>
+            <div class="proj" style="${b.headStyle}"><span class="pname" contenteditable="false" spellcheck="false" data-cwd="${escapeHtml(b.cwd)}">${escapeHtml(b.name)}</span>${colorinp}<span class="idtag">${escapeHtml(b.sid.slice(0,6))}</span><button class="xbtn" title="dismiss (respawns on next activity)" onclick="event.stopPropagation()">✕</button></div>
             <div class="st">${b.stCore}<span class="age">${escapeHtml(b.age)}</span></div>
             <div class="title" contenteditable="false" spellcheck="false" data-sid="${escapeHtml(b.sid)}">${escapeHtml(b.label)}</div>
             ${lastp}
@@ -2272,9 +2255,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         function enterEdit(card){
           const pname = card.querySelector('.pname');
           const title = card.querySelector('.title');
-          const btn = card.querySelector('.editbtn');
           cpBusy = true; card.draggable = false; card.classList.add('editing');
-          if(btn) btn.textContent = '✓';
           if(title){
             title.contentEditable = 'true';   // sublabel editable in edit mode
             // contenteditable often leaves a stray <br>/whitespace after the
@@ -2302,7 +2283,6 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
           editingCard = null;
           const pname = card.querySelector('.pname');
           const title = card.querySelector('.title');
-          const btn = card.querySelector('.editbtn');
           if(pname){
             pname.contentEditable = 'false';
             const name = pname.textContent.trim();
@@ -2316,7 +2296,6 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             if(label !== card.dataset.label0)
               saveUI({session_id: title.dataset.sid, label});
           }
-          if(btn) btn.textContent = '✎';
           card.classList.remove('editing'); card.draggable = true; cpBusy = false;
         }
 
@@ -2353,34 +2332,16 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
               if(e.key==='Enter' || e.key==='Escape'){ e.preventDefault(); exitEdit(el.closest('.scard')); }
             });
           });
-          // ✎ toggles an edit panel: name + sublabel become editable + colorpicker
-          // appears. Edit mode is sticky (clicking the colorpicker won't dismiss
-          // it); ✎ / Enter / Escape ends it.
-          document.querySelectorAll('.scard .editbtn').forEach(btn=>{
-            const card = btn.closest('.scard');
-            btn.addEventListener('click', e=>{
-              e.stopPropagation();
-              card.classList.contains('editing') ? exitEdit(card) : enterEdit(card);
-            });
-          });
-          // Double-click the color header band to enter edit mode. Ignore the
-          // inner controls (swatch / ✎ / ⤢) so they keep their own behavior, and
-          // do nothing if already editing (lets you select header text then).
+          // Double-click the color header band to enter edit mode: name +
+          // sublabel become editable + colorpicker appears. Ignore the inner
+          // controls (swatch / ✕) so they keep their own behavior, and do
+          // nothing if already editing (lets you select header text then).
           document.querySelectorAll('.scard .proj').forEach(proj=>{
             proj.addEventListener('dblclick', e=>{
-              if(e.target.closest('.swatch, .editbtn, .focusbtn, .xbtn')) return;
+              if(e.target.closest('.swatch, .xbtn')) return;
               const card = proj.closest('.scard');
               if(card.classList.contains('editing')) return;
               enterEdit(card);
-            });
-          });
-          // ⤢ focuses the matching terminal window (local sessions and remote
-          // sessions viewed through a local SSH terminal alike).
-          document.querySelectorAll('.scard .focusbtn').forEach(btn=>{
-            btn.addEventListener('click', e=>{
-              e.stopPropagation();
-              if(justDragged) return;  // swallowed click (drag / outside-commit)
-              sendFocus(btn.closest('.scard'));
             });
           });
           // Tunnel on/off chips on remote machines in the instrument panel.
@@ -2420,7 +2381,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             card.addEventListener('mousedown', e=>{ card._mx = e.clientX; card._my = e.clientY; });
             card.addEventListener('click', e=>{
               if(justDragged || card.classList.contains('editing')) return;
-              if(e.target.closest('.editbtn, .focusbtn, .swatch, .pname, .title, button, input, label')) return;
+              if(e.target.closest('.swatch, .pname, .title, button, input, label')) return;
               if(card._mx != null &&
                  (Math.abs(e.clientX - card._mx) > 5 || Math.abs(e.clientY - card._my) > 5)) return;
               sendFocus(card);
