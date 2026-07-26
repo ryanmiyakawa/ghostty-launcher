@@ -1256,67 +1256,88 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         .cockpit-bar .close-stale:hover { color:#ff8aa2; border-color:rgba(255,92,122,.55);
                                           background:rgba(255,92,122,.10); }
         .machines { display:flex; flex-direction:column; gap:1.1rem; }
-        /* Machine strip: the single, always-visible line of machine state —
-           health dot + name (+ ssh toggle for remotes). Sessions themselves
-           all flow into one unified grid below. */
-        /* Account usage strip: mirrors Claude Code's /usage screen. Slim neon
-           meters at the very top of the cockpit. Independent of the roster
-           diff-renderer — updated on its own 60s poll. */
-        .usage-strip { display:flex; flex-wrap:wrap; align-items:center;
-                       gap:.55rem .9rem; margin-bottom:1rem; }
-        .usage-strip .umeter { display:inline-flex; align-items:center; gap:.5rem;
-                       padding:.28rem .7rem .28rem .6rem; border-radius:999px;
-                       background:rgba(255,255,255,.04);
-                       border:1px solid rgba(148,163,184,.18);
-                       font-size:.74rem; font-weight:600; letter-spacing:.04em; }
-        .usage-strip .ulabel { text-transform:uppercase; letter-spacing:.08em;
-                       font-size:.66rem; font-weight:700; color:#8aa0b6; }
-        .usage-strip .ubar { position:relative; width:64px; height:6px;
-                       border-radius:999px; background:rgba(148,163,184,.16);
-                       overflow:hidden; flex:none; }
-        .usage-strip .ubar > i { position:absolute; left:0; top:0; bottom:0;
-                       border-radius:999px; display:block; }
-        .usage-strip .upct { font-variant-numeric:tabular-nums; min-width:2.2em;
-                       text-align:right; }
-        .usage-strip .ureset { font-size:.66rem; color:#64748b; font-weight:500;
-                       letter-spacing:.02em; }
-        /* Severity colors: cyan normal, amber >=70, red >=90. */
-        .usage-strip .u-normal { color:#7fe6f5; }
-        .usage-strip .u-normal .ubar > i { background:linear-gradient(90deg,#00c6dd,#5ef0ff);
-                       box-shadow:0 0 8px -2px rgba(94,240,255,.8); }
-        .usage-strip .u-warn { color:#ffcf7a; }
-        .usage-strip .u-warn .ubar > i { background:linear-gradient(90deg,#e8a13a,#ffcf7a);
-                       box-shadow:0 0 8px -2px rgba(255,207,122,.8); }
-        .usage-strip .u-crit { color:#ff8aa2; }
-        .usage-strip .u-crit .ubar > i { background:linear-gradient(90deg,#e0455e,#ff8aa2);
-                       box-shadow:0 0 8px -2px rgba(255,138,162,.85); }
-        .usage-strip .umeter.model { padding:.24rem .62rem; font-size:.72rem; }
-        .usage-strip .umeter.model .ulabel { color:inherit; opacity:.85; }
-        .usage-strip .usep { width:1px; align-self:stretch; margin:.15rem 0;
-                       background:rgba(148,163,184,.22); }
-        .mstrip { display:flex; flex-wrap:wrap; align-items:center;
-                  gap:.5rem 1.4rem; margin-bottom:1rem; min-height:1.4rem; }
-        .mstrip .ms { display:inline-flex; align-items:center; gap:.5rem;
-                      font-size:.8rem; font-weight:600; text-transform:uppercase;
-                      letter-spacing:.06em; color:#94a3b8; }
-        .mstrip .ms.ms-paused { opacity:.55; }
-        .mstrip .msdot { width:.55rem; height:.55rem; border-radius:50%; flex:none; }
+        /* ===== Cockpit instrument panel =====================================
+           One designed header that fuses account-usage *fuel gauges* (left,
+           showing quota REMAINING and draining downward) with the machine /
+           SSH cluster (right). Two mount points live inside a single static
+           shell: #gauges is repainted only by the 60s usageTick; the machine
+           cluster #mcluster is repainted only on roster changes by the 1.5s
+           cockpitTick. Neither writes the other's node, so the two update
+           cadences never fight. If usage is unavailable, #gauges collapses
+           (display:none) and the panel shows machines alone — no empty hole. */
+        .cockpit-panel { display:flex; align-items:stretch; gap:1.25rem;
+                         flex-wrap:wrap; margin-bottom:1.15rem;
+                         padding:.8rem 1.15rem; border-radius:14px;
+                         background:linear-gradient(180deg,rgba(24,30,48,.72),rgba(12,15,25,.78));
+                         border:1px solid rgba(94,240,255,.16);
+                         box-shadow:0 1px 0 rgba(255,255,255,.03) inset,
+                                    0 0 22px -14px rgba(94,240,255,.6); }
+        /* --- fuel-gauge bank (usage) --- */
+        .gauge-bank { display:flex; align-items:flex-end; gap:.95rem;
+                      padding-right:1.25rem;
+                      border-right:1px solid rgba(148,163,184,.2); }
+        .gauge { display:flex; flex-direction:column; align-items:center;
+                 gap:.3rem; min-width:2.65rem; }
+        .gauge .g-pct { font-size:.74rem; font-weight:800; line-height:1;
+                        font-variant-numeric:tabular-nums; letter-spacing:.01em; }
+        .gauge .g-track { position:relative; width:15px; height:56px;
+                          border-radius:5px; overflow:hidden;
+                          background:rgba(148,163,184,.12);
+                          box-shadow:inset 0 0 0 1px rgba(148,163,184,.16),
+                                     inset 0 2px 7px rgba(0,0,0,.55);
+                          background-image:repeating-linear-gradient(0deg,
+                            transparent 0, transparent 12.5px,
+                            rgba(148,163,184,.15) 12.5px, rgba(148,163,184,.15) 13.5px); }
+        .gauge .g-fill { position:absolute; left:0; right:0; bottom:0;
+                         border-radius:0 0 5px 5px;
+                         transition:height .55s cubic-bezier(.4,0,.2,1), background .3s; }
+        .gauge .g-fill::before { content:''; position:absolute; left:0; right:0; top:0;
+                         height:2px; background:rgba(255,255,255,.55);
+                         box-shadow:0 0 6px 1px rgba(255,255,255,.35); }
+        .gauge .g-lab { font-size:.6rem; font-weight:800; letter-spacing:.1em;
+                        text-transform:uppercase; color:#8aa0b6; line-height:1;
+                        white-space:nowrap; }
+        .gauge .g-reset { font-size:.58rem; font-weight:600; color:#5a6b80;
+                          letter-spacing:.02em; line-height:1; min-height:.72em; }
+        /* color by REMAINING fuel: cyan plenty · amber <=30 left · red <=10 left */
+        .gauge.g-ok   .g-pct { color:#7fe6f5; }
+        .gauge.g-ok   .g-fill { background:linear-gradient(180deg,#5ef0ff,#12a9bd);
+                                box-shadow:0 0 11px -1px rgba(94,240,255,.8); }
+        .gauge.g-warn .g-pct { color:#ffcf7a; }
+        .gauge.g-warn .g-fill { background:linear-gradient(180deg,#ffd98c,#df8f2c);
+                                box-shadow:0 0 11px -1px rgba(255,207,122,.8); }
+        .gauge.g-crit .g-pct { color:#ff8aa2; }
+        .gauge.g-crit .g-fill { background:linear-gradient(180deg,#ff9fb2,#d43a54);
+                                box-shadow:0 0 12px 0 rgba(255,138,162,.85); }
+        /* faint divider before the per-model gauges */
+        .gauge.g-model-first { margin-left:.35rem; padding-left:.85rem;
+                               border-left:1px solid rgba(148,163,184,.16); }
+        /* --- machine / ssh cluster --- */
+        .mcluster { display:flex; flex-wrap:wrap; align-content:center;
+                    align-items:center; gap:.55rem 1.35rem; flex:1 1 auto;
+                    min-height:1.4rem; }
+        .mcluster .ms { display:inline-flex; align-items:center; gap:.5rem;
+                        font-size:.8rem; font-weight:600; text-transform:uppercase;
+                        letter-spacing:.06em; color:#94a3b8; }
+        .mcluster .ms.ms-paused { opacity:.55; }
+        .mcluster .msdot { width:.55rem; height:.55rem; border-radius:50%; flex:none;
+                           box-shadow:0 0 6px -1px rgba(0,0,0,.6); }
         /* Tunnel on/off switch (opt-in ssh — the primary way a host comes
            online): always visible, clearly labelled, color-coded. */
-        .mstrip .tglbtn { cursor:pointer; user-select:none; -webkit-user-select:none;
+        .cockpit-panel .tglbtn { cursor:pointer; user-select:none; -webkit-user-select:none;
                           font-size:.68rem; font-weight:700; letter-spacing:.04em;
                           text-transform:uppercase;
                           padding:.18rem .6rem; border-radius:999px;
                           transition:color .12s, border-color .12s, background .12s,
                                      box-shadow .12s; }
-        .mstrip .tglbtn.live { color:#8fd4a5; border:1px solid rgba(111,158,128,.6);
+        .cockpit-panel .tglbtn.live { color:#8fd4a5; border:1px solid rgba(111,158,128,.6);
                                background:rgba(111,158,128,.14);
                                box-shadow:0 0 10px -4px rgba(111,158,128,.7); }
-        .mstrip .tglbtn.live:hover { color:#b9ecc8; border-color:rgba(111,158,128,.9);
+        .cockpit-panel .tglbtn.live:hover { color:#b9ecc8; border-color:rgba(111,158,128,.9);
                                      background:rgba(111,158,128,.22); }
-        .mstrip .tglbtn.off { color:#94a0ac; border:1px solid rgba(148,163,184,.45);
+        .cockpit-panel .tglbtn.off { color:#94a0ac; border:1px solid rgba(148,163,184,.45);
                               background:rgba(255,255,255,.06); }
-        .mstrip .tglbtn.off:hover { color:#e2e8f0; border-color:rgba(148,163,184,.8);
+        .cockpit-panel .tglbtn.off:hover { color:#e2e8f0; border-color:rgba(148,163,184,.8);
                                     background:rgba(255,255,255,.12); }
         /* Left-aligned, wrapping grid: bounded track max keeps cards sane on
            huge windows; sections with few cards stay flush left under their
@@ -1508,7 +1529,10 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                         title="dismiss every stale card (any live session respawns on its next activity)">✕ close stale</button>
                 <span class="sub" id="cockpit-sub"></span>
             </div>
-            <div class="usage-strip" id="usage-strip" style="display:none"></div>
+            <div class="cockpit-panel" id="cockpit-panel">
+                <div class="gauge-bank" id="gauges" style="display:none"></div>
+                <div class="mcluster" id="mcluster"></div>
+            </div>
             <div class="machines" id="machines"><div class="none">Connecting…</div></div>
         </div>
 
@@ -2159,16 +2183,19 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             allBits.map(b=>[b.sid, b.canFocus, !!b.lastp])
           ]);
           const container = document.getElementById('machines');
-          if(roster === cockpitRoster && container.querySelector('.mstrip')){
+          const mcluster = document.getElementById('mcluster');
+          if(roster === cockpitRoster && mcluster && mcluster.children.length){
             for(const b of allBits){
               const card = container.querySelector(`.scard[data-sid="${b.sid}"]`);
               if(card) patchCard(card, b);
             }
           } else {
-            // Machine strip: dot + name (+ ssh toggle for remotes). Green =
-            // reachable, dim gray = paused (deliberate), red = enabled but
-            // unreachable (error in the tooltip).
-            let strip = '<div class="mstrip">';
+            // Machine cluster (right side of the instrument panel): dot + name
+            // (+ ssh toggle for remotes). Green = reachable, dim gray = paused
+            // (deliberate), red = enabled but unreachable (error in tooltip).
+            // Rendered into its own #mcluster mount so it never collides with
+            // the gauge bank that usageTick repaints on a separate cadence.
+            let cluster = '';
             for(const m of machines){
               const dot = m.paused ? '#5a6472' : (m.reachable ? '#6f9e80' : '#b06e7c');
               const stateTip = m.paused ? 'tunnel paused'
@@ -2180,11 +2207,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
               // tags) so the mapping is learnable; the dot keeps health.
               const nameStyle = m.local ? '' :
                 ` style="color:hsl(${machineHue(m.name)},65%,70%)"`;
-              strip += `<span class="ms${m.paused?' ms-paused':''}" title="${escapeHtml(m.label||'')} — ${escapeHtml(stateTip)}">
+              cluster += `<span class="ms${m.paused?' ms-paused':''}" title="${escapeHtml(m.label||'')} — ${escapeHtml(stateTip)}">
                 <span class="msdot" style="background:${dot}"></span><span class="msname"${nameStyle}>${escapeHtml(m.name)}</span>${tgl}</span>`;
             }
-            strip += '</div>';
-            container.innerHTML = strip + (total
+            mcluster.innerHTML = cluster;
+            container.innerHTML = (total
               ? '<div class="grid">' + allBits.map(cardHTML).join('') + '</div>'
               : '<div class="none">No sessions reporting yet.<br>Start a Claude session on any wired machine.</div>');
             wireCockpitCards();
@@ -2328,8 +2355,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
               sendFocus(btn.closest('.scard'));
             });
           });
-          // Tunnel on/off chips on remote machine headers.
-          document.querySelectorAll('.mstrip .tglbtn').forEach(btn=>{
+          // Tunnel on/off chips on remote machines in the instrument panel.
+          document.querySelectorAll('.cockpit-panel .tglbtn').forEach(btn=>{
             btn.addEventListener('click', async e=>{
               e.stopPropagation();
               const enable = btn.dataset.on !== '1';
@@ -2412,57 +2439,52 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
           });
         }
 
-        // ---- Account usage strip (Claude Code /usage) ----------------------
+        // ---- Account usage fuel gauges (Claude Code /usage) ----------------
         // Polls /api/usage every 60s, fully independent of the 1.5s roster
-        // poll and its diff-renderer. Hides itself entirely when unavailable.
+        // poll and its diff-renderer. Writes ONLY the #gauges mount inside the
+        // instrument panel (never the sibling #mcluster the roster owns), and
+        // collapses that mount entirely when usage is unavailable.
+        // Gauges read as fuel tanks: the fill = quota REMAINING (100 − used),
+        // anchored at the bottom and draining downward as quota is consumed —
+        // a full bright column is untouched quota, a low bar is nearly out.
         let usageTimer = null;
-        function usageSev(pct){ return pct>=90 ? 'u-crit' : (pct>=70 ? 'u-warn' : 'u-normal'); }
-        function usageReset(iso){
+        // Severity is by REMAINING fuel: amber at <=30% left, red at <=10%.
+        function fuelSev(rem){ return rem<=10 ? 'g-crit' : (rem<=30 ? 'g-warn' : 'g-ok'); }
+        function fuelReset(iso){
           if(!iso) return '';
           const t = new Date(iso).getTime();
           if(isNaN(t)) return '';
           const diff = t - Date.now();
           if(diff <= 0) return 'now';
           const h = Math.floor(diff/3600000), m = Math.floor((diff%3600000)/60000);
-          if(diff < 3600000) return 'resets '+m+'m';
-          if(diff < 86400000) return 'resets '+h+'h';
-          const day = new Date(t).toLocaleDateString([], {weekday:'short'});
-          return 'resets '+escapeHtml(day);
+          if(diff < 3600000) return m+'m';
+          if(diff < 86400000) return h+'h';
+          return new Date(t).toLocaleDateString([], {weekday:'short'});
         }
-        function usageMeter(label, u){
-          if(!u || u.pct==null) return '';
-          const pct = Math.max(0, Math.min(100, Math.round(u.pct)));
-          const sev = usageSev(pct);
-          const reset = usageReset(u.resets_at);
-          return `<span class="umeter ${sev}">`
-            + `<span class="ulabel">${escapeHtml(label)}</span>`
-            + `<span class="ubar"><i style="width:${pct}%"></i></span>`
-            + `<span class="upct">${pct}%</span>`
-            + (reset ? `<span class="ureset">${reset}</span>` : '')
-            + `</span>`;
-        }
-        function usageModelPill(m){
-          if(!m || m.pct==null) return '';
-          const pct = Math.max(0, Math.min(100, Math.round(m.pct)));
-          const sev = usageSev(pct);
-          return `<span class="umeter model ${sev}">`
-            + `<span class="ulabel">${escapeHtml(m.name||'')}</span>`
-            + `<span class="ubar"><i style="width:${pct}%"></i></span>`
-            + `<span class="upct">${pct}%</span>`
-            + `</span>`;
+        function fuelGauge(label, pctUsed, iso, extraCls){
+          const used = Math.max(0, Math.min(100, Math.round(pctUsed)));
+          const rem = 100 - used;                 // fuel left
+          const sev = fuelSev(rem);
+          const reset = fuelReset(iso);
+          return `<div class="gauge ${sev}${extraCls ? ' ' + extraCls : ''}">`
+            + `<div class="g-pct">${rem}%</div>`
+            + `<div class="g-track"><i class="g-fill" style="height:${rem}%"></i></div>`
+            + `<div class="g-lab">${escapeHtml(label)}</div>`
+            + `<div class="g-reset">${reset ? escapeHtml(reset) : ''}</div>`
+            + `</div>`;
         }
         async function usageTick(){
           let d;
           try { d = await (await fetch('/api/usage')).json(); }
           catch(e){ return; }  // keep last render on transient failure
-          const el = document.getElementById('usage-strip');
+          const el = document.getElementById('gauges');
           if(!el) return;
           if(!d || !d.available){ el.style.display='none'; el.innerHTML=''; return; }
-          let html = usageMeter('5h', d.session) + usageMeter('week', d.weekly);
+          let html = '';
+          if(d.session && d.session.pct!=null) html += fuelGauge('5H', d.session.pct, d.session.resets_at);
+          if(d.weekly && d.weekly.pct!=null)   html += fuelGauge('WEEK', d.weekly.pct, d.weekly.resets_at);
           const models = (d.models||[]).filter(m=>m && m.pct!=null);
-          if(models.length){
-            html += '<span class="usep"></span>' + models.map(usageModelPill).join('');
-          }
+          models.forEach((m,i)=>{ html += fuelGauge(m.name||'', m.pct, m.resets_at, i===0 ? 'g-model-first' : ''); });
           if(!html.trim()){ el.style.display='none'; el.innerHTML=''; return; }
           el.innerHTML = html;
           el.style.display = 'flex';
