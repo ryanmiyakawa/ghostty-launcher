@@ -23,10 +23,16 @@ PORT = int(os.environ.get("AGENT_COLLECTOR_PORT", "8458"))
 # Label for this machine in the cockpit. Override on generic VPS hostnames.
 MACHINE = os.environ.get("AGENT_COCKPIT_MACHINE") or socket.gethostname()
 
-# A "working" session that hasn't sent a heartbeat in this many seconds is
-# reclassified as "stale" (likely crashed / SSH dropped mid-run). Idle sessions
-# legitimately stay quiet, so staleness only applies to active states.
-STALE_AFTER = float(os.environ.get("AGENT_STALE_AFTER", "45"))
+# A session in an active state that hasn't emitted in this many seconds gets
+# reclassified as "stale". Claude Code hooks are event-driven with NO heartbeat:
+# a single long tool call (build, test suite, long bash, subagent Task) fires
+# PreToolUse then stays silent until PostToolUse, and long thinking/generation
+# between tools is silent too. Gaps of many seconds are normal for a session
+# that is genuinely working, so this threshold is deliberately generous (10 min)
+# — "stale" should mean a genuinely abandoned/crashed session (SSH dropped, host
+# died), not one that's merely quiet for a moment while running a long tool.
+# Idle sessions legitimately stay quiet, so staleness only applies to active states.
+STALE_AFTER = float(os.environ.get("AGENT_STALE_AFTER", "600"))
 ACTIVE_STATES = {"working", "starting"}
 
 # Persist the live roster to disk so a service restart (deploy, reboot) doesn't
