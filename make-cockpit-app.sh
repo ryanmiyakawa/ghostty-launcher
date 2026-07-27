@@ -63,9 +63,43 @@ if ! curl -fs --max-time 2 "\$URL" >/dev/null 2>&1; then
 fi
 
 # 2. Open the dashboard as an app-style window.
+#    If a cockpit window is already open in Chrome, focus it instead of
+#    spawning a duplicate. Only touch Chrome via AppleScript when it's already
+#    running — a 'tell' would otherwise auto-launch a full Chrome just to look.
 CHROME="/Applications/Google Chrome.app"
 if [ -d "\$CHROME" ]; then
-  open -na "Google Chrome" --args --app="\$URL"
+  FOCUSED=0
+  if pgrep -x "Google Chrome" >/dev/null 2>&1; then
+    FOCUSED=\$(osascript <<'APPLESCRIPT'
+on run
+    set matchNeedle to "127.0.0.1:8457"
+    try
+        tell application "Google Chrome"
+            if (count of windows) is 0 then return "0"
+            repeat with w in windows
+                repeat with t in (tabs of w)
+                    try
+                        if (URL of t as string) contains matchNeedle then
+                            set index of w to 1
+                            activate
+                            return "1"
+                        end if
+                    end try
+                end repeat
+            end repeat
+        end tell
+    end try
+    return "0"
+end run
+APPLESCRIPT
+)
+  fi
+  # No existing cockpit window (or Chrome wasn't running): create the app
+  # window. The -n is correct here — with none open, it reliably makes the
+  # chromeless --app window (--app is ignored if Chrome is already running).
+  if [ "\$FOCUSED" != "1" ]; then
+    open -na "Google Chrome" --args --app="\$URL"
+  fi
 else
   open "\$URL"
 fi
