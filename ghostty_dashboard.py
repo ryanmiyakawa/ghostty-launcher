@@ -1329,14 +1329,47 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             line-height: 1.5; white-space: pre-wrap; word-break: break-word;
             border-top: 1px solid rgba(255,255,255,0.05); padding-top: 0.5rem;
         }
-        /* Phase 2 placeholder — AI narrative slot. */
+        /* Phase 2 — AI narrative slot (lazy Haiku summaries). */
         .sb-commit .sb-c-summary {
-            margin-top: 0.55rem; font-size: 0.8rem; color: #64748b;
-            font-style: italic; display: flex; align-items: center; gap: 0.4rem;
+            margin-top: 0.55rem; font-size: 0.8rem;
         }
-        .sb-commit .sb-c-summary::before {
+        /* Pending / loading / error keep the subtle italic + sparkle. */
+        .sb-commit .sb-c-summary.pending,
+        .sb-commit .sb-c-summary.loading,
+        .sb-commit .sb-c-summary.error {
+            color: #64748b; font-style: italic;
+            display: flex; align-items: center; gap: 0.4rem;
+        }
+        .sb-commit .sb-c-summary.pending::before,
+        .sb-commit .sb-c-summary.loading::before {
             content: "✨"; opacity: 0.5; font-style: normal;
         }
+        .sb-commit .sb-c-summary.loading { color: #a78bfa; }
+        .sb-commit .sb-c-summary.loading::before {
+            opacity: 0.9; animation: sb-twinkle 1.1s ease-in-out infinite;
+        }
+        @keyframes sb-twinkle { 0%,100% { opacity: 0.3; } 50% { opacity: 1; } }
+        .sb-commit .sb-c-summary.error::before {
+            content: "⚠"; opacity: 0.6; font-style: normal;
+        }
+        /* Done — real summary, readable prose + bullets. */
+        .sb-commit .sb-c-summary.done {
+            color: #cbd5e1; font-style: normal; line-height: 1.5;
+            border-top: 1px solid rgba(139,92,246,0.18);
+            padding-top: 0.5rem;
+        }
+        .sb-commit .sb-c-summary.done p { margin: 0 0 0.35rem 0; }
+        .sb-commit .sb-c-summary.done p:last-child { margin-bottom: 0; }
+        .sb-commit .sb-c-summary.done ul {
+            margin: 0.15rem 0 0 0; padding-left: 1.15rem;
+        }
+        .sb-commit .sb-c-summary.done li { margin: 0.12rem 0; color: #b4c0d3; }
+        .sb-commit .sb-c-summary.done code {
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 0.75rem; background: rgba(139,92,246,0.14);
+            color: #c4b5fd; padding: 0.05rem 0.3rem; border-radius: 4px;
+        }
+        .sb-commit .sb-c-summary.done strong { color: #e2e8f0; }
         .sb-loadmore {
             align-self: center; margin-top: 0.4rem;
             font-size: 0.82rem; padding: 0.5rem 1.3rem;
@@ -1936,6 +1969,95 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         let sbCurrentProject = null;
         let sbSkip = 0;
 
+        // --- Phase 2: lazy, throttled AI summary fetching ---
+        const SB_SUMMARY_CONCURRENCY = 3;   // at most 3 in-flight calls
+        const SB_SUMMARY_AUTOBATCH = 18;    // auto-fetch this many per view/page
+        let sbSummaryQueue = [];
+        let sbSummaryActive = 0;
+        let sbSummaryToken = 0;             // bumped on project switch to cancel stale jobs
+        const sbSummarySeen = new Set();    // project|sha already requested this session
+
+        function resetSummaries() {
+            sbSummaryToken++;
+            sbSummaryQueue = [];
+        }
+
+        function enqueueSummaries(project, shas) {
+            const token = sbSummaryToken;
+            for (const sha of shas) {
+                if (!sha) continue;
+                const key = project + '|' + sha;
+                if (sbSummarySeen.has(key)) continue;   // cached in-session already
+                sbSummarySeen.add(key);
+                sbSummaryQueue.push({ project, sha, token });
+            }
+            pumpSummaries();
+        }
+
+        function pumpSummaries() {
+            while (sbSummaryActive < SB_SUMMARY_CONCURRENCY && sbSummaryQueue.length) {
+                const job = sbSummaryQueue.shift();
+                if (job.token !== sbSummaryToken) continue;   // stale (project switched)
+                sbSummaryActive++;
+                fetchSummary(job).catch(() => {}).finally(() => {
+                    sbSummaryActive--;
+                    pumpSummaries();
+                });
+            }
+        }
+
+        function sbSummaryEl(sha) {
+            return document.querySelector('.sb-c-summary[data-sha="' + sha + '"]');
+        }
+
+        async function fetchSummary(job) {
+            if (job.token !== sbSummaryToken) return;
+            const el = sbSummaryEl(job.sha);
+            if (el) { el.className = 'sb-c-summary loading'; el.textContent = 'generating…'; }
+            let data = null;
+            try {
+                const res = await fetch('/api/storybook/summary?project=' +
+                    encodeURIComponent(job.project) + '&sha=' + encodeURIComponent(job.sha));
+                data = await res.json();
+            } catch (err) { data = null; }
+            if (job.token !== sbSummaryToken) return;
+            const target = sbSummaryEl(job.sha);
+            if (!target) return;
+            if (data && data.summary) {
+                target.className = 'sb-c-summary done';
+                target.innerHTML = renderSummaryMd(data.summary);
+            } else {
+                target.className = 'sb-c-summary error';
+                target.textContent = 'summary unavailable';
+            }
+        }
+
+        // Minimal, safe markdown: bullet lists + paragraphs + inline bold/code.
+        function renderSummaryMd(text) {
+            const lines = (text || '').replace(/\r/g, '').split('\n');
+            let html = '';
+            let inList = false;
+            for (const raw of lines) {
+                const line = raw.trim();
+                const bullet = /^[-*•]\s+(.*)/.exec(line);
+                if (bullet) {
+                    if (!inList) { html += '<ul>'; inList = true; }
+                    html += '<li>' + sbMdInline(bullet[1]) + '</li>';
+                } else {
+                    if (inList) { html += '</ul>'; inList = false; }
+                    if (line) html += '<p>' + sbMdInline(line) + '</p>';
+                }
+            }
+            if (inList) html += '</ul>';
+            return html || ('<p>' + escapeHtml(text) + '</p>');
+        }
+        function sbMdInline(s) {
+            s = escapeHtml(s);
+            s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+            s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
+            return s;
+        }
+
         function sbRel(epoch) {
             if (!epoch) return '';
             const s = Date.now() / 1000 - epoch;
@@ -2041,6 +2163,10 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 commits = await res.json();
             } catch (err) { commits = []; }
             renderTimeline(commits, sbSkip > 0);
+            // Cancel any in-flight jobs from a prior project, then lazily fetch
+            // summaries for just the first visible batch (cached ones return fast).
+            resetSummaries();
+            enqueueSummaries(name, (commits || []).slice(0, SB_SUMMARY_AUTOBATCH).map(c => c.sha));
         }
 
         function commitHtml(c) {
@@ -2057,7 +2183,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 </div>
                 <div class="sb-c-subject">${escapeHtml(c.subject)}</div>
                 ${body}
-                <div class="sb-c-summary">summary pending</div>
+                <div class="sb-c-summary pending" data-sha="${escapeHtml(c.sha)}">summary pending</div>
             </div>`;
         }
 
@@ -2090,6 +2216,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 commits = await res.json();
             } catch (err) { commits = []; }
             renderTimeline(commits, true);
+            // Fetch summaries for the newly revealed older batch too.
+            enqueueSummaries(sbCurrentProject,
+                (commits || []).slice(0, SB_SUMMARY_AUTOBATCH).map(c => c.sha));
         }
 
         function showOverview() {
@@ -2864,6 +2993,12 @@ class Handler(BaseHTTPRequestHandler):
                                 "application/json")
         elif route == "/api/storybook/overview":
             self._send_response(json.dumps(storybook.repo_overview()),
+                                "application/json")
+        elif route == "/api/storybook/summary":
+            q = parse_qs(urlparse(self.path).query)
+            name = q.get("project", [""])[0]
+            sha = q.get("sha", [""])[0]
+            self._send_response(json.dumps(storybook.commit_summary(name, sha)),
                                 "application/json")
         elif route == "/api/storybook":
             q = parse_qs(urlparse(self.path).query)

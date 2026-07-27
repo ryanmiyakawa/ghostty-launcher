@@ -14,8 +14,11 @@ Consumed by ghostty_dashboard.py via:
 
 import json
 import os
+import re
 import subprocess
 import time
+import urllib.error
+import urllib.request
 
 # Same launcher config the dashboard reads.
 CONFIG_PATH = os.path.expanduser("~/.claude/ghostty_dashboard_config.json")
@@ -276,6 +279,309 @@ def commit_timeline(project_name, limit=100, skip=0):
         })
 
     return commits
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 — lazy AI commit summaries (Haiku) with an immutable per-SHA cache.
+#
+# A commit SHA is immutable, so a summary of that SHA never needs to change:
+# once generated it is cached to disk (OUTSIDE any repo) and served forever.
+# Only successes are cached — errors retry next time. The Anthropic API key is
+# read fresh from the macOS Keychain at call time and NEVER logged, cached in a
+# global, persisted, or returned in any response.
+# ---------------------------------------------------------------------------
+
+# Config knob: bump to a Sonnet id later without touching call sites.
+SUMMARY_MODEL = "claude-haiku-4-5-20251001"
+SUMMARY_MAX_TOKENS = 300
+
+_ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
+_ANTHROPIC_VERSION = "2023-06-01"
+_ANTHROPIC_TIMEOUT = 45
+
+# Keychain lookup for the summary key (service/account per project setup).
+_KEYCHAIN_SERVICE = "cockpit-anthropic"
+_KEYCHAIN_ACCOUNT = "storybook"
+
+# On-disk cache, deliberately outside every repo so it is never committed.
+CACHE_DIR = os.path.expanduser("~/.claude/storybook-cache")
+
+# Diff caps — keep token cost and noise bounded.
+_MAX_PATCH_LINES_PER_FILE = 400
+_MAX_PATCH_BYTES = 20 * 1024  # ~20 KB total patch across the commit
+
+# Paths whose PATCH BODY we never send to the API. They still show up in the
+# --stat (filenames only). Lockfiles/vendored/generated = noise; the .env/key/
+# credential entries are a security belt-and-suspenders (secrets should never
+# be committed, but if one is, its contents must not leave the machine).
+_EXCLUDE_GLOBS = [
+    # lockfiles
+    "**/package-lock.json", "**/yarn.lock", "**/pnpm-lock.yaml",
+    "**/poetry.lock", "**/Cargo.lock", "**/composer.lock",
+    "**/Gemfile.lock", "**/go.sum",
+    # vendored / generated trees
+    "**/node_modules/**", "**/vendor/**", "**/dist/**", "**/build/**",
+    # minified / generated / bundles / sourcemaps
+    "**/*.min.js", "**/*.min.css", "**/*.map", "**/*.bundle.js",
+    # secrets (contents excluded — filenames still visible in the stat)
+    "**/.env", "**/.env.*", "**/*.pem", "**/*.key",
+    "**/id_rsa*", "**/credentials", "**/secrets",
+]
+
+
+def _read_api_key():
+    """Read the Anthropic key from the Keychain. Return the key or None.
+
+    Read fresh each call; never logged, cached, or persisted anywhere.
+    """
+    try:
+        r = subprocess.run(
+            ["security", "find-generic-password",
+             "-s", _KEYCHAIN_SERVICE, "-a", _KEYCHAIN_ACCOUNT, "-w"],
+            capture_output=True, text=True, timeout=5)
+    except Exception:
+        return None
+    if r.returncode != 0:
+        # Fall back to a service-only lookup (account may not be stored).
+        try:
+            r = subprocess.run(
+                ["security", "find-generic-password", "-s", _KEYCHAIN_SERVICE, "-w"],
+                capture_output=True, text=True, timeout=5)
+        except Exception:
+            return None
+    if r.returncode != 0:
+        return None
+    key = (r.stdout or "").strip()
+    return key or None
+
+
+def _cache_path(full_sha):
+    return os.path.join(CACHE_DIR, full_sha[:2], full_sha + ".json")
+
+
+def _read_cache(full_sha):
+    """Return the cached record dict for a SHA, or None."""
+    try:
+        with open(_cache_path(full_sha), "r") as f:
+            data = json.load(f)
+        if isinstance(data, dict) and data.get("summary"):
+            return data
+    except (OSError, json.JSONDecodeError, ValueError):
+        pass
+    return None
+
+
+def _write_cache(full_sha, model, summary):
+    """Persist a SUCCESSFUL summary. Best-effort; never raises."""
+    try:
+        path = _cache_path(full_sha)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({
+                "sha": full_sha,
+                "model": model,
+                "summary": summary,
+                "generated_at_epoch": int(time.time()),
+            }, f)
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def _commit_stat(root, full_sha):
+    """`git show --stat` (name + insertions/deletions per file, includes
+    binaries/lockfiles by filename). Returns text or ''."""
+    res = _run_git([
+        "-C", root, "show", "--stat", "--format=", full_sha,
+    ], timeout=15)
+    if res is None or res.returncode != 0:
+        return ""
+    return (res.stdout or "").strip()
+
+
+def _commit_patch(root, full_sha):
+    """Filtered, bounded unified diff for a commit.
+
+    Uses `:(exclude,glob)` pathspecs so excluded/secret files never contribute
+    patch bytes, then truncates to <=400 lines/file and <=~20 KB total.
+    Returns (patch_text, truncated_bool).
+    """
+    pathspec = ["--", "."] + [f":(exclude,glob){g}" for g in _EXCLUDE_GLOBS]
+    res = _run_git([
+        "-C", root, "show", "--format=", "--unified=3", full_sha, *pathspec,
+    ], timeout=20)
+    if res is None or res.returncode != 0:
+        return "", False
+    raw = res.stdout or ""
+    if not raw.strip():
+        return "", False
+
+    # Split into per-file blocks on `diff --git` boundaries.
+    blocks = []
+    current = []
+    for line in raw.split("\n"):
+        if line.startswith("diff --git ") and current:
+            blocks.append(current)
+            current = [line]
+        else:
+            current.append(line)
+    if current:
+        blocks.append(current)
+
+    out_parts = []
+    total = 0
+    truncated = False
+    for block in blocks:
+        if len(block) > _MAX_PATCH_LINES_PER_FILE:
+            block = block[:_MAX_PATCH_LINES_PER_FILE]
+            block.append("... (file diff truncated)")
+            truncated = True
+        chunk = "\n".join(block)
+        if total + len(chunk) > _MAX_PATCH_BYTES:
+            remaining = _MAX_PATCH_BYTES - total
+            if remaining > 0:
+                out_parts.append(chunk[:remaining])
+            truncated = True
+            break
+        out_parts.append(chunk)
+        total += len(chunk) + 1
+    patch = "\n".join(out_parts).strip()
+    return patch, truncated
+
+
+def _commit_message(root, full_sha):
+    """Return (subject, body) for a SHA."""
+    res = _run_git([
+        "-C", root, "show", "-s", "--format=%s" + _RS + "%b", full_sha,
+    ], timeout=10)
+    if res is None or res.returncode != 0:
+        return "", ""
+    parts = (res.stdout or "").split(_RS, 1)
+    subject = parts[0].strip() if parts else ""
+    body = parts[1].strip() if len(parts) > 1 else ""
+    return subject, body
+
+
+_SUMMARY_SYSTEM = (
+    "You are a precise software-history narrator. Given a single git commit "
+    "(its message plus a filtered, possibly truncated diff), explain what the "
+    "change actually does in plain language for a developer skimming project "
+    "history. Stay strictly grounded in the evidence shown: the commit message "
+    "and the diff. Do NOT invent motivation, features, or files that are not "
+    "present; only mention 'why' if it is stated in the message or clearly "
+    "implied by the diff. If the diff was truncated, summarize what is visible "
+    "and do not guess at the rest. Be concise and concrete."
+)
+
+
+def _build_summary_prompt(subject, body, stat, patch, truncated):
+    parts = ["Summarize this commit.\n"]
+    parts.append("=== Commit subject ===\n" + (subject or "(none)"))
+    if body:
+        parts.append("\n=== Commit body ===\n" + body)
+    if stat:
+        parts.append("\n=== Files changed (git show --stat) ===\n" + stat)
+    if patch:
+        note = " (NOTE: diff truncated)" if truncated else ""
+        parts.append(f"\n=== Filtered diff{note} ===\n" + patch)
+    else:
+        parts.append("\n=== Filtered diff ===\n(no textual diff available — "
+                     "binary, excluded, or empty change)")
+    parts.append(
+        "\n=== Your task ===\n"
+        "Write one or two plain-language sentences describing what this change "
+        "does (add 'why' ONLY if the message/diff makes it clear — never "
+        "invent a reason). Then up to 3 short bullet points of concrete "
+        "specifics (files/areas touched, notable additions or removals). Keep "
+        "it grounded in the diff above; do not restate the subject verbatim — "
+        "add interpretation. Plain text / light markdown only."
+    )
+    return "\n".join(parts)
+
+
+def _call_anthropic(key, system, prompt):
+    """POST to the Messages API and return the text. Raises on failure.
+
+    The key travels only in the request header — never logged or returned.
+    """
+    body = json.dumps({
+        "model": SUMMARY_MODEL,
+        "max_tokens": SUMMARY_MAX_TOKENS,
+        "system": system,
+        "messages": [{"role": "user", "content": prompt}],
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        _ANTHROPIC_URL, data=body, method="POST", headers={
+            "x-api-key": key,
+            "anthropic-version": _ANTHROPIC_VERSION,
+            "content-type": "application/json",
+        })
+    with urllib.request.urlopen(req, timeout=_ANTHROPIC_TIMEOUT) as r:
+        payload = json.loads(r.read().decode())
+    content = payload.get("content") or []
+    if content and isinstance(content, list):
+        text = content[0].get("text", "")
+        if text:
+            return text
+    raise RuntimeError("empty-response")
+
+
+def commit_summary(project_name, sha):
+    """Return {sha, summary, cached} for a commit, generating + caching lazily.
+
+    On ANY failure returns {sha, summary: None, error: <short reason>} with a
+    reason string that contains NO key material. Never raises. Only successful
+    summaries are cached (errors retry on the next request).
+    """
+    if not sha or not re.fullmatch(r"[0-9a-fA-F]{7,40}", sha):
+        return {"sha": sha, "summary": None, "error": "bad-sha"}
+
+    repo = _resolve_project(project_name)
+    if repo is None:
+        return {"sha": sha, "summary": None, "error": "unknown-project"}
+
+    # Resolve to a full, verified commit sha inside this repo (never a path).
+    res = _run_git(["-C", repo["root"], "rev-parse", "--verify",
+                    "--quiet", sha + "^{commit}"])
+    if res is None or res.returncode != 0 or not res.stdout.strip():
+        return {"sha": sha, "summary": None, "error": "unknown-commit"}
+    full_sha = res.stdout.strip()
+
+    cached = _read_cache(full_sha)
+    if cached:
+        return {"sha": full_sha, "summary": cached["summary"], "cached": True}
+
+    key = _read_api_key()
+    if not key:
+        return {"sha": full_sha, "summary": None, "error": "no-api-key"}
+
+    try:
+        subject, body = _commit_message(repo["root"], full_sha)
+        stat = _commit_stat(repo["root"], full_sha)
+        patch, truncated = _commit_patch(repo["root"], full_sha)
+        prompt = _build_summary_prompt(subject, body, stat, patch, truncated)
+    except Exception:
+        return {"sha": full_sha, "summary": None, "error": "git-error"}
+
+    try:
+        text = _call_anthropic(key, _SUMMARY_SYSTEM, prompt)
+    except urllib.error.HTTPError as e:
+        # Status code only — never the body/headers (belt-and-suspenders).
+        return {"sha": full_sha, "summary": None, "error": f"api-http-{e.code}"}
+    except urllib.error.URLError:
+        return {"sha": full_sha, "summary": None, "error": "api-network"}
+    except Exception:
+        return {"sha": full_sha, "summary": None, "error": "api-error"}
+    finally:
+        del key  # drop the reference promptly
+
+    text = (text or "").strip()
+    if not text:
+        return {"sha": full_sha, "summary": None, "error": "empty-summary"}
+
+    _write_cache(full_sha, SUMMARY_MODEL, text)
+    return {"sha": full_sha, "summary": text, "cached": False}
 
 
 if __name__ == "__main__":
