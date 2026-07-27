@@ -18,6 +18,10 @@ import webbrowser
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import parse_qs, quote, urlparse
 
+# Git-history "storybook" (Phase 1: raw commit timelines, no AI). Kept in its
+# own module so this file stays manageable; see storybook.py.
+import storybook
+
 CONFIG_PATH = os.path.expanduser("~/.claude/ghostty_dashboard_config.json")
 PORT = 8457
 
@@ -1243,6 +1247,102 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             font-size: 0.85em;
         }
 
+        /* ---- Storybook (git-history timeline) ---- */
+        .sb-bar {
+            display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1.1rem;
+        }
+        .sb-title { font-size: 1.05rem; font-weight: 600; color: #e2e8f0; }
+        .sb-back { font-size: 0.8rem; padding: 0.4rem 0.85rem; }
+        .sb-overview {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+            gap: 0.75rem;
+        }
+        .sb-card {
+            display: flex; align-items: center; gap: 0.85rem;
+            padding: 0.9rem 1.1rem;
+            background: rgba(255,255,255,0.04);
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 12px;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+        .sb-card:hover {
+            background: rgba(255,255,255,0.08);
+            border-color: #8b5cf6;
+            transform: translateY(-1px);
+            box-shadow: 0 6px 20px -8px rgba(139,92,246,0.5);
+        }
+        .sb-card .sb-icon {
+            font-size: 1.5rem; width: 2.2rem; height: 2.2rem;
+            display: flex; align-items: center; justify-content: center;
+            border-radius: 10px; flex-shrink: 0;
+        }
+        .sb-card .sb-body { min-width: 0; flex: 1; }
+        .sb-card .sb-name {
+            font-weight: 700; font-size: 0.98rem; margin-bottom: 0.15rem;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        }
+        .sb-card .sb-last {
+            font-size: 0.8rem; color: #94a3b8;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        }
+        .sb-card .sb-when {
+            font-size: 0.72rem; color: #64748b; white-space: nowrap; flex-shrink: 0;
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        }
+        .sb-card .sb-nocommit { font-size: 0.8rem; color: #475569; font-style: italic; }
+
+        /* Timeline */
+        .sb-timeline { display: flex; flex-direction: column; gap: 0.7rem; }
+        .sb-commit {
+            background: rgba(255,255,255,0.03);
+            border: 1px solid rgba(255,255,255,0.07);
+            border-left: 3px solid #8b5cf6;
+            border-radius: 10px;
+            padding: 0.85rem 1.1rem;
+        }
+        .sb-commit .sb-c-top {
+            display: flex; align-items: center; gap: 0.65rem;
+            font-size: 0.72rem; color: #94a3b8; margin-bottom: 0.4rem;
+            flex-wrap: wrap;
+        }
+        .sb-commit .sb-c-sha {
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            color: #c4b5fd; background: rgba(139,92,246,0.14);
+            padding: 0.1rem 0.4rem; border-radius: 5px;
+        }
+        .sb-commit .sb-c-when { color: #cbd5e1; }
+        .sb-commit .sb-c-author { color: #64748b; }
+        .sb-commit .sb-c-stat {
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 0.7rem;
+        }
+        .sb-commit .sb-c-stat .add { color: #4ade80; }
+        .sb-commit .sb-c-stat .del { color: #f87171; }
+        .sb-commit .sb-c-stat .files { color: #64748b; }
+        .sb-commit .sb-c-subject {
+            font-size: 0.95rem; color: #e2e8f0; font-weight: 500; line-height: 1.4;
+        }
+        .sb-commit .sb-c-body {
+            margin-top: 0.5rem; font-size: 0.82rem; color: #94a3b8;
+            line-height: 1.5; white-space: pre-wrap; word-break: break-word;
+            border-top: 1px solid rgba(255,255,255,0.05); padding-top: 0.5rem;
+        }
+        /* Phase 2 placeholder — AI narrative slot. */
+        .sb-commit .sb-c-summary {
+            margin-top: 0.55rem; font-size: 0.8rem; color: #64748b;
+            font-style: italic; display: flex; align-items: center; gap: 0.4rem;
+        }
+        .sb-commit .sb-c-summary::before {
+            content: "✨"; opacity: 0.5; font-style: normal;
+        }
+        .sb-loadmore {
+            align-self: center; margin-top: 0.4rem;
+            font-size: 0.82rem; padding: 0.5rem 1.3rem;
+        }
+        .sb-empty { color: #64748b; text-align: center; padding: 3rem 1rem; }
+
         /* ---- Cockpit (live agent status) ---- */
         .cockpit-bar { display:flex; align-items:center; justify-content:flex-end;
                        gap:.75rem; margin-bottom:1rem; min-height:1.2rem; }
@@ -1557,16 +1657,15 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         </div>
 
         <div id="view-status" style="display:none">
-            <div class="status-bar">
-                <span class="status-updated" id="status-updated"></span>
-                <button class="btn btn-secondary status-refresh" id="status-refresh" onclick="loadStatus(true)">↻ Refresh</button>
+            <div class="sb-bar">
+                <button class="btn btn-secondary sb-back" id="sb-back" style="display:none" onclick="showOverview()">← All projects</button>
+                <span class="sb-title" id="sb-title">Storybook</span>
+                <span style="flex:1"></span>
+                <span class="status-updated" id="sb-updated"></span>
+                <button class="btn btn-secondary status-refresh" id="sb-refresh" onclick="loadStorybook(true)">↻ Refresh</button>
             </div>
-            <div class="status-layout">
-                <div class="status-list" id="status-list"></div>
-                <div class="status-detail" id="status-detail">
-                    <div class="status-empty">Select a project to view its status.</div>
-                </div>
-            </div>
+            <div id="sb-overview" class="sb-overview"></div>
+            <div id="sb-timeline" class="sb-timeline" style="display:none"></div>
         </div>
     </div>
 
@@ -1828,7 +1927,173 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 document.getElementById('view-' + v).style.display = (v === name) ? '' : 'none';
                 document.getElementById('tab-' + v).classList.toggle('active', v === name);
             }
-            if (name === 'status' && !statusLoaded) loadStatus();
+            if (name === 'status' && !storybookLoaded) loadStorybook();
+        }
+
+        // ---- Storybook (git-history timeline) ----
+        let storybookLoaded = false;
+        let sbOverview = [];
+        let sbCurrentProject = null;
+        let sbSkip = 0;
+
+        function sbRel(epoch) {
+            if (!epoch) return '';
+            const s = Date.now() / 1000 - epoch;
+            if (s < 60) return 'just now';
+            if (s < 3600) return Math.floor(s / 60) + 'm ago';
+            if (s < 86400) return Math.floor(s / 3600) + 'h ago';
+            if (s < 604800) return Math.floor(s / 86400) + 'd ago';
+            if (s < 2592000) return Math.floor(s / 604800) + 'w ago';
+            if (s < 31536000) return Math.floor(s / 2592000) + 'mo ago';
+            return Math.floor(s / 31536000) + 'y ago';
+        }
+
+        async function loadStorybook(manual) {
+            storybookLoaded = true;
+            const btn = document.getElementById('sb-refresh');
+            if (manual && btn) btn.classList.add('spinning');
+            const ov = document.getElementById('sb-overview');
+            if (!sbOverview.length) ov.innerHTML = '<div class="sb-empty">Loading…</div>';
+            try {
+                const res = await fetch('/api/storybook/overview');
+                sbOverview = await res.json();
+            } catch (err) {
+                sbOverview = [];
+            } finally {
+                if (btn) btn.classList.remove('spinning');
+            }
+            // If we were viewing a project timeline, refresh it; else the overview.
+            if (sbCurrentProject) {
+                openTimeline(sbCurrentProject);
+            } else {
+                renderOverview();
+            }
+            const upd = document.getElementById('sb-updated');
+            if (upd) upd.textContent = 'Updated ' + new Date().toLocaleTimeString();
+        }
+
+        function renderOverview() {
+            sbCurrentProject = null;
+            document.getElementById('sb-back').style.display = 'none';
+            document.getElementById('sb-title').textContent = 'Storybook';
+            document.getElementById('sb-timeline').style.display = 'none';
+            const ov = document.getElementById('sb-overview');
+            ov.style.display = '';
+            if (!sbOverview.length) {
+                ov.innerHTML = '<div class="sb-empty">No git repositories found.</div>';
+                return;
+            }
+            ov.innerHTML = sbOverview.map((r, i) => {
+                const last = r.last_subject
+                    ? `<div class="sb-last">${escapeHtml(r.last_subject)}</div>`
+                    : '<div class="sb-nocommit">no commits yet</div>';
+                const when = r.last_commit_epoch
+                    ? `<span class="sb-when">${sbRel(r.last_commit_epoch)}</span>` : '';
+                return `<div class="sb-card" onclick="openTimelineIdx(${i})">
+                    <span class="sb-icon" style="background:${escapeHtml(r.background || '#16213e')}">${r.icon || '📁'}</span>
+                    <div class="sb-body">
+                        <div class="sb-name" style="color:${sbNameColor(r)}">${escapeHtml(r.name)}</div>
+                        ${last}
+                    </div>
+                    ${when}
+                </div>`;
+            }).join('');
+        }
+
+        // Lighten a #rrggbb toward white until it clears a legibility floor so
+        // dark terminal-background project colors stay readable on the dark UI.
+        function sbNameColor(r) {
+            let hex = (r.foreground && r.foreground !== '#ffffff')
+                ? r.foreground : (r.background || '#c4b5fd');
+            const m = /^#?([0-9a-f]{6})$/i.exec(hex);
+            if (!m) return '#e2e8f0';
+            let n = parseInt(m[1], 16);
+            let rr = (n >> 16) & 255, gg = (n >> 8) & 255, bb = n & 255;
+            // Perceived luminance; if too dark, blend toward white.
+            let lum = 0.299 * rr + 0.587 * gg + 0.114 * bb;
+            if (lum < 150) {
+                const t = (150 - lum) / 255 + 0.25;
+                rr = Math.round(rr + (255 - rr) * t);
+                gg = Math.round(gg + (255 - gg) * t);
+                bb = Math.round(bb + (255 - bb) * t);
+            }
+            return `rgb(${rr},${gg},${bb})`;
+        }
+
+        function openTimelineIdx(i) {
+            const r = sbOverview[i];
+            if (r) openTimeline(r.name);
+        }
+
+        async function openTimeline(name, skip) {
+            sbCurrentProject = name;
+            sbSkip = skip || 0;
+            document.getElementById('sb-overview').style.display = 'none';
+            document.getElementById('sb-back').style.display = '';
+            document.getElementById('sb-title').textContent = name;
+            const tl = document.getElementById('sb-timeline');
+            tl.style.display = '';
+            if (!sbSkip) tl.innerHTML = '<div class="sb-empty">Loading commits…</div>';
+            let commits = [];
+            try {
+                const res = await fetch('/api/storybook?project=' + encodeURIComponent(name) +
+                                        '&skip=' + sbSkip);
+                commits = await res.json();
+            } catch (err) { commits = []; }
+            renderTimeline(commits, sbSkip > 0);
+        }
+
+        function commitHtml(c) {
+            const stat = `<span class="sb-c-stat"><span class="files">${c.files_changed}f</span> ` +
+                `<span class="add">+${c.insertions}</span> <span class="del">−${c.deletions}</span></span>`;
+            const body = c.body
+                ? `<div class="sb-c-body">${escapeHtml(c.body)}</div>` : '';
+            return `<div class="sb-commit">
+                <div class="sb-c-top">
+                    <span class="sb-c-sha">${escapeHtml(c.short_sha)}</span>
+                    <span class="sb-c-when">${escapeHtml(c.author_relative)}</span>
+                    ${stat}
+                    <span class="sb-c-author">${escapeHtml(c.author_name)}</span>
+                </div>
+                <div class="sb-c-subject">${escapeHtml(c.subject)}</div>
+                ${body}
+                <div class="sb-c-summary">summary pending</div>
+            </div>`;
+        }
+
+        function renderTimeline(commits, append) {
+            const tl = document.getElementById('sb-timeline');
+            if (!append && (!commits || !commits.length)) {
+                tl.innerHTML = '<div class="sb-empty">No commit history for this project.</div>';
+                return;
+            }
+            const html = (commits || []).map(commitHtml).join('');
+            const more = (commits && commits.length >= 100)
+                ? `<button class="btn btn-secondary sb-loadmore" onclick="loadOlder()">Load older ↓</button>`
+                : '';
+            if (append) {
+                const btn = tl.querySelector('.sb-loadmore');
+                if (btn) btn.remove();
+                tl.insertAdjacentHTML('beforeend', html + more);
+            } else {
+                tl.innerHTML = html + more;
+            }
+        }
+
+        async function loadOlder() {
+            if (!sbCurrentProject) return;
+            sbSkip += 100;
+            let commits = [];
+            try {
+                const res = await fetch('/api/storybook?project=' +
+                    encodeURIComponent(sbCurrentProject) + '&skip=' + sbSkip);
+                commits = await res.json();
+            } catch (err) { commits = []; }
+            renderTimeline(commits, true);
+        }
+
+        function showOverview() {
+            renderOverview();
         }
 
         async function loadStatus(manual) {
@@ -1963,11 +2228,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             });
         }
 
-        // Silently refresh the status view every 2 minutes (only when it's visible
-        // and the tab is focused, to avoid needless git pulls in the background).
+        // Silently refresh the storybook view every 2 minutes (only when it's
+        // visible and the tab is focused, to avoid needless git work in the bg).
         setInterval(() => {
             const visible = document.getElementById('view-status').style.display !== 'none';
-            if (visible && !document.hidden) loadStatus(false);
+            if (visible && !document.hidden && storybookLoaded) loadStorybook(false);
         }, 120000);
 
         // ---- Cockpit (live agent status) ----
@@ -2596,6 +2861,15 @@ class Handler(BaseHTTPRequestHandler):
                                                         q.get("sid", [""])[0],
                                                         q.get("cwd", [""])[0],
                                                         q.get("mach", [""])[0])),
+                                "application/json")
+        elif route == "/api/storybook/overview":
+            self._send_response(json.dumps(storybook.repo_overview()),
+                                "application/json")
+        elif route == "/api/storybook":
+            q = parse_qs(urlparse(self.path).query)
+            name = q.get("project", [""])[0]
+            skip = q.get("skip", ["0"])[0]
+            self._send_response(json.dumps(storybook.commit_timeline(name, skip=skip)),
                                 "application/json")
         elif self.path.startswith("/api/history"):
             q = parse_qs(urlparse(self.path).query)
